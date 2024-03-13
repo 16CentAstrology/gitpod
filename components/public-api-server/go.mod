@@ -24,7 +24,7 @@ require (
 	github.com/stretchr/testify v1.8.1
 	github.com/stripe/stripe-go/v72 v72.122.0
 	google.golang.org/grpc v1.50.1
-	google.golang.org/protobuf v1.28.1
+	google.golang.org/protobuf v1.33.0
 	gorm.io/gorm v1.24.1
 )
 
