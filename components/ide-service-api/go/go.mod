@@ -28,10 +28,10 @@ require (
 	github.com/sirupsen/logrus v1.8.1 // indirect
 	github.com/slok/go-http-metrics v0.10.0 // indirect
 	github.com/stretchr/testify v1.7.0 // indirect
-	golang.org/x/net v0.0.0-20220225172249-27dd8689420f // indirect
+	golang.org/x/net v0.23.0 // indirect
 	golang.org/x/sync v0.0.0-20220601150217-0de741cfad7f // indirect
-	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a // indirect
-	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/sys v0.18.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.0.0-20220922220347-f3bd1da661af // indirect
 	google.golang.org/genproto v0.0.0-20201019141844-1ed22bb0c154 // indirect
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
