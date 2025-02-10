@@ -12,10 +12,16 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/containerd/containerd/remotes"
+	"github.com/containerd/containerd/remotes/docker"
+	"github.com/docker/cli/cli/config/configfile"
 	"github.com/gitpod-io/gitpod/common-go/baseserver"
+	"github.com/gitpod-io/gitpod/common-go/experiments"
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/watch"
 	gitpodapi "github.com/gitpod-io/gitpod/gitpod-protocol"
@@ -29,12 +35,19 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
+// ResolverProvider provides new resolver
+type ResolverProvider func() remotes.Resolver
+
 type IDEServiceServer struct {
-	config                 *config.ServiceConfiguration
-	originIDEConfig        []byte
-	parsedIDEConfigContent string
-	ideConfig              *config.IDEConfig
-	ideConfigFileName      string
+	config                         *config.ServiceConfiguration
+	originIDEConfig                []byte
+	parsedIDEConfigContent         string
+	parsedCode1_85IDEConfigContent string
+	ideConfig                      *config.IDEConfig
+	code1_85IdeConfig              *config.IDEConfig
+	ideConfigFileName              string
+	experimentsClient              experiments.Client
+	resolver                       ResolverProvider
 
 	api.UnimplementedIDEServiceServer
 }
@@ -56,8 +69,38 @@ func Start(logger *logrus.Entry, cfg *config.ServiceConfiguration) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize ide-service: %w", err)
 	}
+	var (
+		dockerCfg   *configfile.ConfigFile
+		dockerCfgMu sync.RWMutex
+	)
 
-	s := New(cfg)
+	resolverProvider := func() remotes.Resolver {
+		var resolverOpts docker.ResolverOptions
+
+		dockerCfgMu.RLock()
+		defer dockerCfgMu.RUnlock()
+		if dockerCfg != nil {
+			resolverOpts.Hosts = docker.ConfigureDefaultRegistries(
+				docker.WithAuthorizer(authorizerFromDockerConfig(dockerCfg)),
+			)
+		}
+
+		return docker.NewResolver(resolverOpts)
+	}
+	if cfg.DockerCfg != "" {
+		dockerCfg = loadDockerCfg(cfg.DockerCfg)
+		err = watch.File(ctx, cfg.DockerCfg, func() {
+			dockerCfgMu.Lock()
+			defer dockerCfgMu.Unlock()
+
+			dockerCfg = loadDockerCfg(cfg.DockerCfg)
+		})
+		if err != nil {
+			log.WithError(err).Fatal("cannot start watch of Docker auth configuration file")
+		}
+	}
+
+	s := New(cfg, resolverProvider)
 	go s.watchIDEConfig(ctx)
 	go s.scheduleUpdate(ctx)
 	s.register(srv.GRPC())
@@ -77,7 +120,40 @@ func Start(logger *logrus.Entry, cfg *config.ServiceConfiguration) error {
 	return nil
 }
 
-func New(cfg *config.ServiceConfiguration) *IDEServiceServer {
+func loadDockerCfg(fn string) *configfile.ConfigFile {
+	if tproot := os.Getenv("TELEPRESENCE_ROOT"); tproot != "" {
+		fn = filepath.Join(tproot, fn)
+	}
+	fr, err := os.OpenFile(fn, os.O_RDONLY, 0)
+	if err != nil {
+		log.WithError(err).Fatal("cannot read docker auth config")
+	}
+
+	dockerCfg := configfile.New(fn)
+	err = dockerCfg.LoadFromReader(fr)
+	fr.Close()
+	if err != nil {
+		log.WithError(err).Fatal("cannot read docker config")
+	}
+	log.WithField("fn", fn).Info("using authentication for backing registries")
+
+	return dockerCfg
+}
+
+// FromDockerConfig turns docker client config into docker registry hosts
+func authorizerFromDockerConfig(cfg *configfile.ConfigFile) docker.Authorizer {
+	return docker.NewDockerAuthorizer(docker.WithAuthCreds(func(host string) (user, pass string, err error) {
+		auth, err := cfg.GetAuthConfig(host)
+		if err != nil {
+			return
+		}
+		user = auth.Username
+		pass = auth.Password
+		return
+	}))
+}
+
+func New(cfg *config.ServiceConfiguration, resolver ResolverProvider) *IDEServiceServer {
 	fn, err := filepath.Abs(cfg.IDEConfigPath)
 	if err != nil {
 		log.WithField("path", cfg.IDEConfigPath).WithError(err).Fatal("cannot convert ide config path to abs path")
@@ -85,6 +161,8 @@ func New(cfg *config.ServiceConfiguration) *IDEServiceServer {
 	s := &IDEServiceServer{
 		config:            cfg,
 		ideConfigFileName: fn,
+		experimentsClient: experiments.NewClient(),
+		resolver:          resolver,
 	}
 	return s
 }
@@ -94,32 +172,76 @@ func (s *IDEServiceServer) register(grpcServer *grpc.Server) {
 }
 
 func (s *IDEServiceServer) GetConfig(ctx context.Context, req *api.GetConfigRequest) (*api.GetConfigResponse, error) {
+	attributes := experiments.Attributes{
+		UserID:    req.User.Id,
+		UserEmail: req.User.GetEmail(),
+	}
+
+	// Check flag to enable vscode for older linux distros (distros that don't support glibc 2.28)
+	enableVscodeForOlderLinuxDistros := s.experimentsClient.GetBoolValue(ctx, "enableVscodeForOlderLinuxDistros", false, attributes)
+
+	if enableVscodeForOlderLinuxDistros {
+		return &api.GetConfigResponse{
+			Content: s.parsedCode1_85IDEConfigContent,
+		}, nil
+	}
+
 	return &api.GetConfigResponse{
 		Content: s.parsedIDEConfigContent,
 	}, nil
 }
 
 func (s *IDEServiceServer) readIDEConfig(ctx context.Context, isInit bool) {
-	b, err := os.ReadFile(s.ideConfigFileName)
+	ideConfigbuffer, err := os.ReadFile(s.ideConfigFileName)
 	if err != nil {
-		log.WithError(err).Warn("cannot read ide config file")
+		log.WithError(err).Warn("cannot read original ide config file")
 		return
 	}
-	if config, err := ParseConfig(ctx, b); err != nil {
+	if originalIdeConfig, err := ParseConfig(ctx, s.resolver(), ideConfigbuffer); err != nil {
 		if !isInit {
-			log.WithError(err).Fatal("cannot parse ide config")
+			log.WithError(err).Fatal("cannot parse original ide config")
 		}
-		log.WithError(err).Error("cannot parse ide config")
+		log.WithError(err).Error("cannot parse original ide config")
 		return
 	} else {
-		parsedConfig, err := json.Marshal(config)
+		parsedConfig, err := json.Marshal(originalIdeConfig)
+		if err != nil {
+			log.WithError(err).Error("cannot marshal original ide config")
+			return
+		}
+
+		// Precompute the config without code 1.85
+		code1_85IdeOptions := originalIdeConfig.IdeOptions.Options
+		ideOptions := make(map[string]config.IDEOption)
+		for key, ide := range code1_85IdeOptions {
+			if key != "code1_85" {
+				ideOptions[key] = ide
+			}
+		}
+
+		ideConfig := &config.IDEConfig{
+			SupervisorImage: originalIdeConfig.SupervisorImage,
+			IdeOptions: config.IDEOptions{
+				Options:           ideOptions,
+				DefaultIde:        originalIdeConfig.IdeOptions.DefaultIde,
+				DefaultDesktopIde: originalIdeConfig.IdeOptions.DefaultDesktopIde,
+				Clients:           originalIdeConfig.IdeOptions.Clients,
+			},
+		}
+
+		parsedIdeConfig, err := json.Marshal(ideConfig)
 		if err != nil {
 			log.WithError(err).Error("cannot marshal ide config")
 			return
 		}
-		s.parsedIDEConfigContent = string(parsedConfig)
-		s.ideConfig = config
-		s.originIDEConfig = b
+
+		s.parsedCode1_85IDEConfigContent = string(parsedConfig)
+		s.code1_85IdeConfig = originalIdeConfig
+
+		s.ideConfig = ideConfig
+		s.parsedIDEConfigContent = string(parsedIdeConfig)
+
+		s.originIDEConfig = ideConfigbuffer
 
 		log.Info("ide config updated")
 	}
@@ -179,27 +301,15 @@ func grpcProbe(cfg baseserver.ServerConfiguration) func() error {
 }
 
 type IDESettings struct {
-	DefaultIde       string `json:"defaultIde,omitempty"`
-	UseLatestVersion bool   `json:"useLatestVersion,omitempty"`
+	DefaultIde        string            `json:"defaultIde,omitempty"`
+	UseLatestVersion  bool              `json:"useLatestVersion,omitempty"`
+	PreferToolbox     bool              `json:"preferToolbox,omitempty"`
+	PinnedIDEversions map[string]string `json:"pinnedIDEversions,omitempty"`
 }
 
 type WorkspaceContext struct {
 	Referrer    string `json:"referrer,omitempty"`
 	ReferrerIde string `json:"referrerIde,omitempty"`
-}
-
-var JetbrainsCode map[string]string
-
-func init() {
-	JetbrainsCode = make(map[string]string)
-	JetbrainsCode["intellij"] = "IIU"
-	JetbrainsCode["goland"] = "GO"
-	JetbrainsCode["pycharm"] = "PCP"
-	JetbrainsCode["phpstorm"] = "PS"
-	JetbrainsCode["rubymine"] = "RM"
-	JetbrainsCode["webstorm"] = "WS"
-	JetbrainsCode["rider"] = "RD"
-	JetbrainsCode["clion"] = "CL"
 }
 
 func (s *IDEServiceServer) resolveReferrerIDE(ideConfig *config.IDEConfig, wsCtx *WorkspaceContext, chosenIDEName string) (ideName string, ideOption *config.IDEOption) {
@@ -247,191 +357,213 @@ func (s *IDEServiceServer) ResolveWorkspaceConfig(ctx context.Context, req *api.
 	log.WithField("req", req).Debug("receive ResolveWorkspaceConfig request")
 
 	// make a copy for ref ideConfig, it's safe because we replace ref in update config
-	ideConfig := s.ideConfig
+	ideConfig := s.code1_85IdeConfig
 
-	var defaultIde *config.IDEOption
-
-	if ide, ok := ideConfig.IdeOptions.Options[ideConfig.IdeOptions.DefaultIde]; !ok {
+	defaultIdeOption, ok := ideConfig.IdeOptions.Options[ideConfig.IdeOptions.DefaultIde]
+	if !ok {
 		// I think it never happen, we have a check to make sure all DefaultIDE should be in Options
 		log.WithError(err).WithField("defaultIDE", ideConfig.IdeOptions.DefaultIde).Error("IDE configuration corrupt, cannot found defaultIDE")
 		return nil, fmt.Errorf("IDE configuration corrupt")
-	} else {
-		defaultIde = &ide
 	}
 
 	resp = &api.ResolveWorkspaceConfigResponse{
 		SupervisorImage: ideConfig.SupervisorImage,
-		WebImage:        defaultIde.Image,
+		WebImage:        defaultIdeOption.Image,
+		IdeImageLayers:  defaultIdeOption.ImageLayers,
 	}
 
-	// TODO: reconsider this
-	// if req.Type != api.WorkspaceType_REGULAR {
-	// 	return resp, nil
-	// }
+	if os.Getenv("CONFIGCAT_SDK_KEY") != "" {
+		resp.Envvars = append(resp.Envvars, &api.EnvironmentVariable{
+			Name:  "GITPOD_CONFIGCAT_ENABLED",
+			Value: "true",
+		})
+	}
 
 	var wsConfig *gitpodapi.GitpodConfig
-	var wsContext *WorkspaceContext
-	var ideSettings *IDESettings
 
-	if req.IdeSettings != "" {
-		if err := json.Unmarshal([]byte(req.IdeSettings), &ideSettings); err != nil {
-			log.WithError(err).WithField("ideSetting", req.IdeSettings).Error("failed to parse ide settings")
-		}
-	}
 	if req.WorkspaceConfig != "" {
 		if err := json.Unmarshal([]byte(req.WorkspaceConfig), &wsConfig); err != nil {
 			log.WithError(err).WithField("workspaceConfig", req.WorkspaceConfig).Error("failed to parse workspace config")
 		}
 	}
-	if req.Context != "" {
-		if err := json.Unmarshal([]byte(req.Context), &wsContext); err != nil {
-			log.WithError(err).WithField("context", req.Context).Error("failed to parse context")
+
+	var ideSettings *IDESettings
+	if req.IdeSettings != "" {
+		if err := json.Unmarshal([]byte(req.IdeSettings), &ideSettings); err != nil {
+			log.WithError(err).WithField("ideSetting", req.IdeSettings).Error("failed to parse ide settings")
 		}
 	}
 
-	userIdeName := ""
-	useLatest := false
+	pinnedIDEversions := make(map[string]string)
 
 	if ideSettings != nil {
-		userIdeName = ideSettings.DefaultIde
-		useLatest = ideSettings.UseLatestVersion
+		pinnedIDEversions = ideSettings.PinnedIDEversions
 	}
 
-	chosenIDE := defaultIde
-
-	getUserIDEImage := func(ideOption *config.IDEOption) string {
+	getUserIDEImage := func(ide string, useLatest bool) string {
+		ideOption := ideConfig.IdeOptions.Options[ide]
 		if useLatest && ideOption.LatestImage != "" {
 			return ideOption.LatestImage
+		}
+
+		if version, ok := pinnedIDEversions[ide]; ok {
+			if idx := slices.IndexFunc(ideOption.Versions, func(v config.IDEVersion) bool { return v.Version == version }); idx >= 0 {
+				return ideOption.Versions[idx].Image
+			}
 		}
 
 		return ideOption.Image
 	}
 
-	getUserPluginImage := func(ideOption *config.IDEOption) string {
-		if useLatest && ideOption.PluginLatestImage != "" {
-			return ideOption.PluginLatestImage
+	getUserImageLayers := func(ide string, useLatest bool) []string {
+		ideOption := ideConfig.IdeOptions.Options[ide]
+		if useLatest {
+			return ideOption.LatestImageLayers
 		}
 
-		return ideOption.PluginImage
-	}
-
-	if userIdeName != "" {
-		if ide, ok := ideConfig.IdeOptions.Options[userIdeName]; ok {
-			chosenIDE = &ide
-
-			// TODO: Currently this variable reflects the IDE selected in
-			// user's settings for backward compatibility but in the future
-			// we want to make it represent the actual IDE.
-			ideAlias := api.EnvironmentVariable{
-				Name:  "GITPOD_IDE_ALIAS",
-				Value: userIdeName,
+		if version, ok := pinnedIDEversions[ide]; ok {
+			if idx := slices.IndexFunc(ideOption.Versions, func(v config.IDEVersion) bool { return v.Version == version }); idx >= 0 {
+				return ideOption.Versions[idx].ImageLayers
 			}
-			resp.Envvars = append(resp.Envvars, &ideAlias)
 		}
+
+		return ideOption.ImageLayers
 	}
 
-	// we always need WebImage for when the user chooses a desktop ide
-	resp.WebImage = getUserIDEImage(defaultIde)
+	if req.Type == api.WorkspaceType_REGULAR {
+		var wsContext *WorkspaceContext
 
-	var desktopImageLayer string
-	var desktopPluginImageLayer string
-	if chosenIDE.Type == config.IDETypeDesktop {
-		desktopImageLayer = getUserIDEImage(chosenIDE)
-		desktopPluginImageLayer = getUserPluginImage(chosenIDE)
-	} else {
-		resp.WebImage = getUserIDEImage(chosenIDE)
-	}
-
-	ideName, referrer := s.resolveReferrerIDE(ideConfig, wsContext, userIdeName)
-	if ideName != "" {
-		resp.RefererIde = ideName
-		desktopImageLayer = getUserIDEImage(referrer)
-		desktopPluginImageLayer = getUserPluginImage(referrer)
-	}
-
-	if desktopImageLayer != "" {
-		resp.IdeImageLayers = append(resp.IdeImageLayers, desktopImageLayer)
-		if desktopPluginImageLayer != "" {
-			resp.IdeImageLayers = append(resp.IdeImageLayers, desktopPluginImageLayer)
+		if req.Context != "" {
+			if err := json.Unmarshal([]byte(req.Context), &wsContext); err != nil {
+				log.WithError(err).WithField("context", req.Context).Error("failed to parse context")
+			}
 		}
+
+		userIdeName := ""
+		useLatest := false
+		preferToolbox := false
+		resultingIdeName := ideConfig.IdeOptions.DefaultIde
+		chosenIDE := ideConfig.IdeOptions.Options[resultingIdeName]
+
+		if ideSettings != nil {
+			userIdeName = ideSettings.DefaultIde
+			useLatest = ideSettings.UseLatestVersion
+			preferToolbox = ideSettings.PreferToolbox
+		}
+
+		if preferToolbox {
+			preferToolboxEnv := api.EnvironmentVariable{
+				Name:  "GITPOD_PREFER_TOOLBOX",
+				Value: "true",
+			}
+			debuggingEnv := api.EnvironmentVariable{
+				Name:  "GITPOD_TOOLBOX_DEBUGGING",
+				Value: s.experimentsClient.GetStringValue(ctx, "enable_experimental_jbtb_debugging", "", experiments.Attributes{UserID: req.User.Id}),
+			}
+			resp.Envvars = append(resp.Envvars, &preferToolboxEnv, &debuggingEnv)
+		}
+
+		if userIdeName != "" {
+			if ide, ok := ideConfig.IdeOptions.Options[userIdeName]; ok {
+				resultingIdeName = userIdeName
+				chosenIDE = ide
+				// TODO: Currently this variable reflects the IDE selected in
+				// user's settings for backward compatibility but in the future
+				// we want to make it represent the actual IDE.
+				ideAlias := api.EnvironmentVariable{
+					Name:  "GITPOD_IDE_ALIAS",
+					Value: userIdeName,
+				}
+				resp.Envvars = append(resp.Envvars, &ideAlias)
+			}
+		}
+
+		// we always need WebImage for when the user chooses a desktop ide
+		resp.WebImage = getUserIDEImage(ideConfig.IdeOptions.DefaultIde, useLatest)
+		resp.IdeImageLayers = getUserImageLayers(ideConfig.IdeOptions.DefaultIde, useLatest)
+
+		var desktopImageLayer string
+		var desktopUserImageLayers []string
+		if chosenIDE.Type == config.IDETypeDesktop {
+			desktopImageLayer = getUserIDEImage(resultingIdeName, useLatest)
+			desktopUserImageLayers = getUserImageLayers(resultingIdeName, useLatest)
+		} else {
+			resp.WebImage = getUserIDEImage(resultingIdeName, useLatest)
+			resp.IdeImageLayers = getUserImageLayers(resultingIdeName, useLatest)
+		}
+
+		// TODO (se) this should be handled on the surface (i.e. server or even dashboard) and not passed as a special workspace context down here.
+		ideName, _ := s.resolveReferrerIDE(ideConfig, wsContext, userIdeName)
+		if ideName != "" {
+			resp.RefererIde = ideName
+			resultingIdeName = ideName
+			desktopImageLayer = getUserIDEImage(ideName, useLatest)
+			desktopUserImageLayers = getUserImageLayers(ideName, useLatest)
+		}
+
+		if desktopImageLayer != "" {
+			resp.IdeImageLayers = append(resp.IdeImageLayers, desktopImageLayer)
+			resp.IdeImageLayers = append(resp.IdeImageLayers, desktopUserImageLayers...)
+		}
+
+		// we are returning the actually used ide name here, which might be different from the user's choice
+		ideSettingsEncoded := new(bytes.Buffer)
+		enc := json.NewEncoder(ideSettingsEncoded)
+		enc.SetEscapeHTML(false)
+
+		resultingIdeSettings := &IDESettings{
+			DefaultIde:       resultingIdeName,
+			UseLatestVersion: useLatest,
+			PreferToolbox:    preferToolbox,
+		}
+
+		err = enc.Encode(resultingIdeSettings)
+		if err != nil {
+			log.WithError(err).Error("cannot marshal ideSettings")
+		}
+
+		resp.IdeSettings = ideSettingsEncoded.String()
 	}
 
+	// TODO figure out how to make it configurable on IDE level, not hardcoded here
 	jbGW, ok := ideConfig.IdeOptions.Clients["jetbrains-gateway"]
 	if req.Type == api.WorkspaceType_PREBUILD && ok {
-		warmUpTask := ""
+		imageLayers := make(map[string]struct{})
 		for _, alias := range jbGW.DesktopIDEs {
+			if _, ok := ideConfig.IdeOptions.Options[alias]; !ok {
+				continue
+			}
 			prebuilds := getPrebuilds(wsConfig, alias)
 			if prebuilds != nil {
+				if prebuilds.Version != "latest" && prebuilds.Version != "stable" && prebuilds.Version != "both" {
+					continue
+				}
+
 				if prebuilds.Version != "latest" {
-					template := `
-echo 'warming up stable release of ${key}...'
-echo 'downloading stable ${key} backend...'
-mkdir /tmp/backend
-curl -sSLo /tmp/backend/backend.tar.gz "https://download.jetbrains.com/product?type=release&distribution=linux&code=${productCode}"
-tar -xf /tmp/backend/backend.tar.gz --strip-components=1 --directory /tmp/backend
-
-echo 'configuring JB system config and caches aligned with runtime...'
-printf '\nshared.indexes.download.auto.consent=true' >> "/tmp/backend/bin/idea.properties"
-unset JAVA_TOOL_OPTIONS
-export IJ_HOST_CONFIG_BASE_DIR=/workspace/.config/JetBrains
-export IJ_HOST_SYSTEM_BASE_DIR=/workspace/.cache/JetBrains
-
-echo 'running stable ${key} backend in warmup mode...'
-/tmp/backend/bin/remote-dev-server.sh warmup "$GITPOD_REPO_ROOT"
-
-echo 'removing stable ${key} backend...'
-rm -rf /tmp/backend
-`
-					if code, ok := JetbrainsCode[alias]; ok {
-						template = strings.ReplaceAll(template, "${key}", alias)
-						template = strings.ReplaceAll(template, "${productCode}", code)
-						warmUpTask += template
+					layers := getUserImageLayers(alias, false)
+					for _, layer := range layers {
+						if _, ok := imageLayers[layer]; !ok {
+							imageLayers[layer] = struct{}{}
+							resp.IdeImageLayers = append(resp.IdeImageLayers, layer)
+						}
 					}
+					resp.IdeImageLayers = append(resp.IdeImageLayers, getUserIDEImage(alias, false))
 				}
 
 				if prebuilds.Version != "stable" {
-					template := `
-echo 'warming up latest release of ${key}...'
-echo 'downloading latest ${key} backend...'
-mkdir /tmp/backend-latest
-curl -sSLo /tmp/backend-latest/backend-latest.tar.gz "https://download.jetbrains.com/product?type=release,eap,rc&distribution=linux&code=${productCode}"
-tar -xf /tmp/backend-latest/backend-latest.tar.gz --strip-components=1 --directory /tmp/backend-latest
-
-echo 'configuring JB system config and caches aligned with runtime...'
-printf '\nshared.indexes.download.auto.consent=true' >> "/tmp/backend-latest/bin/idea.properties"
-unset JAVA_TOOL_OPTIONS
-export IJ_HOST_CONFIG_BASE_DIR=/workspace/.config/JetBrains-latest
-export IJ_HOST_SYSTEM_BASE_DIR=/workspace/.cache/JetBrains-latest
-
-echo 'running ${key} backend in warmup mode...'
-/tmp/backend-latest/bin/remote-dev-server.sh warmup "$GITPOD_REPO_ROOT"
-
-echo 'removing latest ${key} backend...'
-rm -rf /tmp/backend-latest
-`
-					if code, ok := JetbrainsCode[alias]; ok {
-						template = strings.ReplaceAll(template, "${key}", alias)
-						template = strings.ReplaceAll(template, "${productCode}", code)
-						warmUpTask += template
+					layers := getUserImageLayers(alias, true)
+					for _, layer := range layers {
+						if _, ok := imageLayers[layer]; !ok {
+							imageLayers[layer] = struct{}{}
+							resp.IdeImageLayers = append(resp.IdeImageLayers, layer)
+						}
 					}
+					resp.IdeImageLayers = append(resp.IdeImageLayers, getUserIDEImage(alias, true))
 				}
 			}
 		}
-		if warmUpTask != "" {
-			warmUpEncoded := new(bytes.Buffer)
-			enc := json.NewEncoder(warmUpEncoded)
-			enc.SetEscapeHTML(false)
-
-			err := enc.Encode(&[]gitpodapi.TaskConfig{{
-				Init: strings.TrimSpace(warmUpTask),
-			}})
-			if err != nil {
-				log.WithError(err).Error("cannot marshal warm up task")
-			}
-
-			resp.Tasks = warmUpEncoded.String()
-		}
 	}
+
 	return
 }
 

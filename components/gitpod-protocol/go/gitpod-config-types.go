@@ -1,4 +1,4 @@
-// Copyright (c) 2022 Gitpod GmbH. All rights reserved.
+// Copyright (c) 2025 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
 // See License.AGPL.txt in the project root for license information.
 
@@ -31,10 +31,10 @@ type CoreDump struct {
 type Env struct {
 }
 
-// Github Configures Gitpod's GitHub app
+// Github Configures Gitpod's GitHub app (deprecated)
 type Github struct {
 
-	// Set to true to enable workspace prebuilds, false to disable them. Defaults to true.
+	// Set to true to enable workspace prebuilds, false to disable them. Defaults to true. (deprecated)
 	Prebuilds interface{} `yaml:"prebuilds,omitempty" json:"prebuilds,omitempty"`
 }
 
@@ -50,13 +50,16 @@ type GitpodConfig struct {
 	// Configure the default action of certain signals is to cause a process to terminate and produce a core dump file, a file containing an image of the process's memory at the time of termination. Disabled by default.
 	CoreDump *CoreDump `yaml:"coreDump,omitempty" json:"coreDump,omitempty"`
 
+	// Environment variables to set on the workspace.
+	Env map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+
 	// Experimental network configuration in workspaces (deprecated). Enabled by default
 	ExperimentalNetwork bool `yaml:"experimentalNetwork,omitempty" json:"experimentalNetwork,omitempty"`
 
 	// Git config values should be provided in pairs. E.g. `core.autocrlf: input`. See https://git-scm.com/docs/git-config#_values.
 	GitConfig map[string]string `yaml:"gitConfig,omitempty" json:"gitConfig,omitempty"`
 
-	// Configures Gitpod's GitHub app
+	// Configures Gitpod's GitHub app (deprecated)
 	Github *Github `yaml:"github,omitempty" json:"github,omitempty"`
 
 	// The Docker image to run your workspace in.
@@ -118,6 +121,9 @@ type Jetbrains struct {
 	// Configure RubyMine integration
 	Rubymine *JetbrainsProduct `yaml:"rubymine,omitempty" json:"rubymine,omitempty"`
 
+	// Configure RustRover integration
+	Rustrover *JetbrainsProduct `yaml:"rustrover,omitempty" json:"rustrover,omitempty"`
+
 	// Configure WebStorm integration
 	Webstorm *JetbrainsProduct `yaml:"webstorm,omitempty" json:"webstorm,omitempty"`
 }
@@ -150,7 +156,7 @@ type PortsItems struct {
 	// The port number (e.g. 1337) or range (e.g. 3000-3999) to expose.
 	Port interface{} `yaml:"port" json:"port"`
 
-	// The protocol to be used. (deprecated)
+	// The protocol of workspace port.
 	Protocol string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
 
 	// Whether the port visibility should be private or public. 'private' (default) will only allow users with workspace access to access the port. 'public' will allow everyone with the port URL to access the port.
@@ -164,7 +170,7 @@ type Prebuilds struct {
 	Version string `yaml:"version,omitempty" json:"version,omitempty"`
 }
 
-// Prebuilds_object Set to true to enable workspace prebuilds, false to disable them. Defaults to true.
+// Prebuilds_object Set to true to enable workspace prebuilds, false to disable them. Defaults to true. (deprecated)
 type Prebuilds_object struct {
 
 	// Add a Review in Gitpod badge to pull requests. Defaults to true.

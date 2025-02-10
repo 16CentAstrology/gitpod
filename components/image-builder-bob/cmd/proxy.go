@@ -10,7 +10,7 @@ import (
 	"os"
 
 	"github.com/containerd/containerd/remotes/docker"
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/spf13/cobra"
 
 	log "github.com/gitpod-io/gitpod/common-go/log"
@@ -59,6 +59,7 @@ var proxyCmd = &cobra.Command{
 		}
 
 		auth := func() docker.Authorizer { return docker.NewDockerAuthorizer(docker.WithAuthCreds(authP.Authorize)) }
+		mirrorAuth := func() docker.Authorizer { return docker.NewDockerAuthorizer(docker.WithAuthCreds(authA.Authorize)) }
 		prx, err := proxy.NewProxy(&url.URL{Host: "localhost:8080", Scheme: "http"}, map[string]proxy.Repo{
 			"base": {
 				Host: reference.Domain(baseref),
@@ -72,7 +73,7 @@ var proxyCmd = &cobra.Command{
 				Tag:  targettag,
 				Auth: auth,
 			},
-		})
+		}, mirrorAuth)
 		if err != nil {
 			log.Fatal(err)
 		}

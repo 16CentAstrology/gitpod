@@ -12,13 +12,7 @@ export interface TokenProvider {
      * Returns a valid authentication token for the given host and user
      * @param user
      * @param host
+     * @param requestedLifetimeMins the time in minutes which a token has to be valid for to be considered as valid
      */
-    getTokenForHost(user: User, host: string): Promise<Token>;
-
-    /**
-     * Retrieves a fresh port authentication token for the given user
-     * @param user
-     * @param workspaceId
-     */
-    getFreshPortAuthenticationToken(user: User, workspaceId: string): Promise<Token>;
+    getTokenForHost(user: User | string, host: string, requestedLifetimeMins?: number): Promise<Token | undefined>;
 }

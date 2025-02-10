@@ -18,15 +18,20 @@
     see https://jetbrains.slack.com/archives/C02BRJLGPGF/p1643369943314119?thread_ts=1643358812.185799&cid=C02BRJLGPGF
     <depends>com.jetbrains.gateway</depends> -->
 
+    <depends optional="true">com.jetbrains.gateway</depends>
+
     <extensions defaultExtensionNs="com.intellij">
         <httpRequestHandler implementation="io.gitpod.jetbrains.auth.GitpodAuthCallbackHandler"/>
         <applicationService serviceImplementation="io.gitpod.jetbrains.gateway.GitpodSettingsState"/>
         <applicationConfigurable parentId="tools" instance="io.gitpod.jetbrains.gateway.GitpodSettingsConfigurable"
                                  id="io.gitpod.jetbrains.gateway.GitpodSettingsConfigurable"
                                  displayName="Gitpod"/>
+        <applicationService serviceInterface="io.gitpod.jetbrains.gateway.common.GitpodConnectionHandleFactory"
+                            serviceImplementation="io.gitpod.jetbrains.gateway.GitpodConnectionHandleFactoryImpl"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.jetbrains">
+        <gatewayConnector implementation="io.gitpod.jetbrains.gateway.GitpodConnector"/>
         <gatewayConnectionProvider implementation="io.gitpod.jetbrains.gateway.GitpodConnectionProvider"/>
     </extensions>
 

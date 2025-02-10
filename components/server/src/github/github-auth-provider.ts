@@ -5,26 +5,26 @@
  */
 
 import { injectable } from "inversify";
-import * as express from "express";
+import express from "express";
 import { AuthProviderInfo } from "@gitpod/gitpod-protocol";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
-import { GitHubScope } from "./scopes";
 import { AuthUserSetup } from "../auth/auth-provider";
 import { Octokit } from "@octokit/rest";
 import { GitHubApiError } from "./api";
 import { GenericAuthProvider } from "../auth/generic-auth-provider";
 import { oauthUrls } from "./github-urls";
+import { GitHubOAuthScopes } from "@gitpod/public-api-common/lib/auth-providers";
 
 @injectable()
 export class GitHubAuthProvider extends GenericAuthProvider {
     get info(): AuthProviderInfo {
         return {
             ...this.defaultInfo(),
-            scopes: GitHubScope.All,
+            scopes: GitHubOAuthScopes.ALL,
             requirements: {
-                default: GitHubScope.Requirements.DEFAULT,
-                publicRepo: GitHubScope.Requirements.PUBLIC_REPO,
-                privateRepo: GitHubScope.Requirements.PRIVATE_REPO,
+                default: GitHubOAuthScopes.Requirements.DEFAULT,
+                publicRepo: GitHubOAuthScopes.Requirements.PUBLIC_REPO,
+                privateRepo: GitHubOAuthScopes.Requirements.PRIVATE_REPO,
             },
         };
     }
@@ -40,13 +40,19 @@ export class GitHubAuthProvider extends GenericAuthProvider {
             ...oauth!,
             authorizationUrl: oauth.authorizationUrl || defaultUrls.authorizationUrl,
             tokenUrl: oauth.tokenUrl || defaultUrls.tokenUrl,
-            scope: GitHubScope.All.join(scopeSeparator),
+            scope: GitHubOAuthScopes.ALL.join(scopeSeparator),
             scopeSeparator,
         };
     }
 
-    authorize(req: express.Request, res: express.Response, next: express.NextFunction, scope?: string[]): void {
-        super.authorize(req, res, next, scope ? scope : GitHubScope.Requirements.DEFAULT);
+    authorize(
+        req: express.Request,
+        res: express.Response,
+        next: express.NextFunction,
+        state: string,
+        scope?: string[],
+    ) {
+        super.authorize(req, res, next, state, scope ? scope : GitHubOAuthScopes.Requirements.DEFAULT);
     }
 
     /**
@@ -61,7 +67,7 @@ export class GitHubAuthProvider extends GenericAuthProvider {
         return this.params.host === "github.com" ? "https://api.github.com" : `https://${this.params.host}/api/v3`;
     }
 
-    protected readAuthUserSetup = async (accessToken: string, _tokenResponse: object) => {
+    protected async readAuthUserSetup(accessToken: string, _tokenResponse: object) {
         const api = new Octokit({
             auth: accessToken,
             request: {
@@ -93,10 +99,18 @@ export class GitHubAuthProvider extends GenericAuthProvider {
                 data: { id, login, avatar_url, name, company, created_at },
                 headers,
             } = currentUser;
+            const publicAvatarURL = new URL(avatar_url);
+            if (publicAvatarURL.host === "private-avatars.githubusercontent.com") {
+                // github has recently been rolling out private JWT-signed avatar URLs which expire after a short time
+                // we need to use the public avatar URL instead so that the avatar is displayed correctly and fits into our database column (which is capped at 255 chars)
+                publicAvatarURL.host = "avatars.githubusercontent.com";
+                publicAvatarURL.searchParams.delete("jwt");
+            }
 
             // https://developer.github.com/apps/building-oauth-apps/understanding-scopes-for-oauth-apps/
             // e.g. X-OAuth-Scopes: repo, user
             const currentScopes = this.normalizeScopes(
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
                 (headers as any)["x-oauth-scopes"].split(this.oauthConfig.scopeSeparator!).map((s: string) => s.trim()),
             );
 
@@ -118,7 +132,7 @@ export class GitHubAuthProvider extends GenericAuthProvider {
                 authUser: {
                     authId: String(id),
                     authName: login,
-                    avatarUrl: avatar_url,
+                    avatarUrl: publicAvatarURL.toString(),
                     name,
                     primaryEmail: filterPrimaryEmail(userEmails),
                     company,
@@ -130,7 +144,7 @@ export class GitHubAuthProvider extends GenericAuthProvider {
             log.error(`(${this.strategyName}) Reading current user info failed`, error, { error });
             throw error;
         }
-    };
+    }
 
     protected normalizeScopes(scopes: string[]) {
         const set = new Set(scopes);

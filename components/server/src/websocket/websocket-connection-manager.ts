@@ -5,14 +5,13 @@
  */
 
 import {
-    ClientHeaderFields,
     Disposable,
     GitpodClient as GitpodApiClient,
     GitpodServerPath,
     RateLimiterError,
     User,
 } from "@gitpod/gitpod-protocol";
-import { ErrorCodes } from "@gitpod/gitpod-protocol/lib/messaging/error";
+import { ApplicationError, ErrorCode, ErrorCodes } from "@gitpod/gitpod-protocol/lib/messaging/error";
 import { ConnectionHandler } from "@gitpod/gitpod-protocol/lib/messaging/handler";
 import {
     JsonRpcConnectionHandler,
@@ -21,8 +20,8 @@ import {
 } from "@gitpod/gitpod-protocol/lib/messaging/proxy-factory";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { EventEmitter } from "events";
-import * as express from "express";
-import { ErrorCodes as RPCErrorCodes, MessageConnection, ResponseError } from "vscode-jsonrpc";
+import express from "express";
+import { ErrorCodes as RPCErrorCodes, MessageConnection, ResponseError, CancellationToken } from "vscode-jsonrpc";
 import { AllAccessFunctionGuard, FunctionAccessGuard, WithFunctionAccessGuard } from "../auth/function-access";
 import { HostContextProvider } from "../auth/host-context-provider";
 import { isValidFunctionName, RateLimiter, RateLimiterConfig, UserRateLimiter } from "../auth/rate-limiter";
@@ -34,8 +33,9 @@ import {
     TeamMemberResourceGuard,
     WithResourceAccessGuard,
     RepositoryResourceGuard,
+    FGAResourceAccessGuard,
 } from "../auth/resource-access";
-import { takeFirst } from "../express-util";
+import { takeFirst, toClientHeaderFields, toHeaders } from "../express-util";
 import {
     increaseApiCallCounter,
     increaseApiConnectionClosedCounter,
@@ -47,6 +47,10 @@ import { GitpodServerImpl } from "../workspace/gitpod-server-impl";
 import * as opentracing from "opentracing";
 import { TraceContext } from "@gitpod/gitpod-protocol/lib/util/tracing";
 import { GitpodHostUrl } from "@gitpod/gitpod-protocol/lib/util/gitpod-host-url";
+import { maskIp } from "../analytics";
+import { runWithRequestContext } from "../util/request-context";
+import { SubjectId } from "../auth/subject-id";
+import { AuditLogService } from "../audit/AuditLogService";
 
 export type GitpodServiceFactory = () => GitpodServerImpl;
 
@@ -95,12 +99,12 @@ export type WebsocketAuthenticationLevel = "user" | "session" | "anonymous";
 export interface ClientMetadata {
     id: string;
     authLevel: WebsocketAuthenticationLevel;
-    sessionId?: string;
     userId?: string;
     type?: WebsocketClientType;
     origin: ClientOrigin;
     version?: string;
     userAgent?: string;
+    headers?: Headers;
 }
 interface ClientOrigin {
     workspaceId?: string;
@@ -109,7 +113,6 @@ interface ClientOrigin {
 export namespace ClientMetadata {
     export function from(
         userId: string | undefined,
-        sessionId?: string,
         data?: Omit<ClientMetadata, "id" | "sessionId" | "authLevel">,
     ): ClientMetadata {
         let id = "anonymous";
@@ -117,17 +120,13 @@ export namespace ClientMetadata {
         if (userId) {
             id = userId;
             authLevel = "user";
-        } else if (sessionId) {
-            id = `session-${sessionId}`;
-            authLevel = "session";
         }
-        return { id, authLevel, userId, sessionId, ...data, origin: data?.origin || {} };
+        return { id, authLevel, userId, ...data, origin: data?.origin || {}, headers: data?.headers };
     }
 
     export function fromRequest(req: any) {
         const expressReq = req as express.Request;
         const user = expressReq.user;
-        const sessionId = expressReq.session?.id;
         const type = WebsocketClientType.getClientType(expressReq);
         const version = takeFirst(expressReq.headers["x-client-version"]);
         const userAgent = takeFirst(expressReq.headers["user-agent"]);
@@ -137,7 +136,13 @@ export namespace ClientMetadata {
             instanceId,
             workspaceId,
         };
-        return ClientMetadata.from(user?.id, sessionId, { type, origin, version, userAgent });
+        return ClientMetadata.from(user?.id, {
+            type,
+            origin,
+            version,
+            userAgent,
+            headers: toHeaders(expressReq.headers),
+        });
     }
 
     function getOriginWorkspaceId(req: express.Request): string | undefined {
@@ -196,11 +201,13 @@ export class WebsocketConnectionManager implements ConnectionHandler {
         protected readonly serverFactory: GitpodServiceFactory,
         protected readonly hostContextProvider: HostContextProvider,
         protected readonly rateLimiterConfig: RateLimiterConfig,
+        protected readonly auditLogService: AuditLogService,
     ) {
         this.jsonRpcConnectionHandler = new GitpodJsonRpcConnectionHandler<GitpodApiClient>(
             this.path,
             this.createProxyTarget.bind(this),
             this.rateLimiterConfig,
+            this.auditLogService,
         );
     }
 
@@ -215,14 +222,13 @@ export class WebsocketConnectionManager implements ConnectionHandler {
         connectionCtx?: TraceContext,
     ): GitpodServerImpl {
         const expressReq = request as express.Request;
-        const session = expressReq.session;
         const user: User | undefined = expressReq.user;
 
         const clientContext = this.getOrCreateClientContext(expressReq);
         const gitpodServer = this.serverFactory();
 
         let resourceGuard: ResourceAccessGuard;
-        let explicitGuard = (expressReq as WithResourceAccessGuard).resourceGuard;
+        const explicitGuard = (expressReq as WithResourceAccessGuard).resourceGuard;
         if (!!explicitGuard) {
             resourceGuard = explicitGuard;
         } else if (!!user) {
@@ -232,20 +238,20 @@ export class WebsocketConnectionManager implements ConnectionHandler {
                 new SharedWorkspaceAccessGuard(),
                 new RepositoryResourceGuard(user, this.hostContextProvider),
             ]);
+            resourceGuard = new FGAResourceAccessGuard(user.id, resourceGuard);
         } else {
             resourceGuard = { canAccess: async () => false };
         }
 
-        const clientHeaderFields: ClientHeaderFields = {
-            ip: takeFirst(expressReq.ips),
-            userAgent: expressReq.headers["user-agent"],
-            dnt: takeFirst(expressReq.headers.dnt),
-            clientRegion: takeFirst(expressReq.headers["x-glb-client-region"]),
-        };
+        const clientHeaderFields = toClientHeaderFields(expressReq);
+        // TODO(gpl): remove once we validated the current approach works
+        log.debug("masked wss client IP", {
+            maskedClientIp: maskIp(clientHeaderFields.ip),
+        });
 
         gitpodServer.initialize(
             client,
-            user,
+            user?.id,
             resourceGuard,
             clientContext.clientMetadata,
             connectionCtx,
@@ -273,8 +279,6 @@ export class WebsocketConnectionManager implements ConnectionHandler {
 
         return new Proxy<GitpodServerImpl>(gitpodServer, {
             get: (target, property: keyof GitpodServerImpl) => {
-                if (session) session.touch();
-
                 return target[property];
             },
         });
@@ -325,6 +329,7 @@ class GitpodJsonRpcConnectionHandler<T extends object> extends JsonRpcConnection
         readonly path: string,
         readonly targetFactory: (proxy: JsonRpcProxy<T>, request?: object, connectionCtx?: TraceContext) => any,
         readonly rateLimiterConfig: RateLimiterConfig,
+        readonly auditLogService: AuditLogService,
     ) {
         super(path, targetFactory); // targetFactory has to adhere to the interface here, but is not used, because we override "onConnection" below
     }
@@ -338,7 +343,6 @@ class GitpodJsonRpcConnectionHandler<T extends object> extends JsonRpcConnection
         traceClientMetadata(ctx, clientMetadata);
         TraceContext.setOWI(ctx, {
             userId: clientMetadata.userId,
-            sessionId: clientMetadata.sessionId,
         });
         connection.onClose(() => span.finish());
 
@@ -347,6 +351,7 @@ class GitpodJsonRpcConnectionHandler<T extends object> extends JsonRpcConnection
             this.createRateLimiter(clientMetadata.id, request),
             clientMetadata,
             ctx,
+            this.auditLogService,
         );
         const proxy = factory.createProxy();
         factory.target = this.targetFactory(proxy, request, ctx);
@@ -371,21 +376,53 @@ class GitpodJsonRpcProxyFactory<T extends object> extends JsonRpcProxyFactory<T>
         protected readonly rateLimiter: RateLimiter,
         protected readonly clientMetadata: ClientMetadata,
         protected readonly connectionCtx: TraceContext,
+        protected readonly auditLogService: AuditLogService,
     ) {
         super();
     }
 
     protected async onRequest(method: string, ...args: any[]): Promise<any> {
         const span = TraceContext.startSpan(method, undefined);
-        const ctx = { span };
         const userId = this.clientMetadata.userId;
+        const abortController = new AbortController();
+        const cancellationToken = args[args.length - 1];
+        if (CancellationToken.is(cancellationToken)) {
+            cancellationToken.onCancellationRequested(() => abortController.abort());
+        }
+        return runWithRequestContext(
+            {
+                requestKind: "jsonrpc",
+                requestMethod: method,
+                signal: abortController.signal,
+                subjectId: userId ? SubjectId.fromUserId(userId) : undefined,
+                traceId: span.context().toTraceId(),
+                headers: this.clientMetadata.headers,
+            },
+            async () => {
+                try {
+                    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+                    const result = await this.internalOnRequest(span, method, ...args);
+                    if (userId) {
+                        // omit the last argument, which is the cancellation token
+                        this.auditLogService.asyncRecordAuditLog(userId, method, args.slice(0, -1));
+                    }
+                    return result;
+                } finally {
+                    span.finish();
+                }
+            },
+        );
+    }
+
+    private async internalOnRequest(span: opentracing.Span, method: string, ...args: any[]): Promise<any> {
+        const userId = this.clientMetadata.userId;
+        const ctx = { span };
         const timer = apiCallDurationHistogram.startTimer();
         try {
             // generic tracing data
             traceClientMetadata(ctx, this.clientMetadata);
             TraceContext.setOWI(ctx, {
                 userId,
-                sessionId: this.clientMetadata.sessionId,
             });
             TraceContext.setJsonRPCMetadata(ctx, method);
 
@@ -408,13 +445,13 @@ class GitpodJsonRpcProxyFactory<T extends object> extends JsonRpcProxyFactory<T>
 
             // explicitly guard against wrong method names
             if (!isValidFunctionName(method)) {
-                throw new ResponseError(ErrorCodes.BAD_REQUEST, `Unknown method '${method}'`);
+                throw new ApplicationError(ErrorCodes.BAD_REQUEST, `Unknown method '${method}'`);
             }
 
             // access guard
             if (!this.accessGuard.canAccess(method)) {
                 // logging/tracing is done in 'catch' clause
-                throw new ResponseError(ErrorCodes.PERMISSION_DENIED, `Request ${method} is not allowed`);
+                throw new ApplicationError(ErrorCodes.PERMISSION_DENIED, `Request ${method} is not allowed`);
             }
 
             // actual call
@@ -423,25 +460,37 @@ class GitpodJsonRpcProxyFactory<T extends object> extends JsonRpcProxyFactory<T>
             observeAPICallsDuration(method, 200, timer());
             return result;
         } catch (e) {
-            if (e instanceof ResponseError) {
+            if (ApplicationError.hasErrorCode(e)) {
                 increaseApiCallCounter(method, e.code);
                 observeAPICallsDuration(method, e.code, timer());
                 TraceContext.setJsonRPCError(ctx, method, e);
 
-                log.info({ userId }, `Request ${method} unsuccessful: ${e.code}/"${e.message}"`, { method, args });
+                const severityLogger = ErrorCode.isUserError(e.code) ? log.info : log.error;
+                severityLogger(
+                    { userId },
+                    `JSON RPC Request ${method} failed with user error: ${e.code}/"${e.message}"`,
+                    {
+                        method,
+                        args,
+                        code: e.code,
+                        message: e.message,
+                    },
+                );
+                throw new ResponseError(e.code, e.message, e.data);
             } else {
                 TraceContext.setError(ctx, e); // this is a "real" error
 
-                const err = new ResponseError(ErrorCodes.INTERNAL_SERVER_ERROR, "internal server error");
+                const err = new ApplicationError(
+                    ErrorCodes.INTERNAL_SERVER_ERROR,
+                    `Internal server error: '${e.message}'`,
+                );
                 increaseApiCallCounter(method, err.code);
                 observeAPICallsDuration(method, err.code, timer());
                 TraceContext.setJsonRPCError(ctx, method, err, true);
 
                 log.error({ userId }, `Request ${method} failed with internal server error`, e, { method, args });
+                throw new ResponseError(ErrorCodes.INTERNAL_SERVER_ERROR, String(e));
             }
-            throw e;
-        } finally {
-            span.finish();
         }
     }
 

@@ -8,24 +8,33 @@ import { Container } from "inversify";
 import * as express from "express";
 import * as prometheusClient from "prom-client";
 import { log, LogrusLogLevel } from "@gitpod/gitpod-protocol/lib/util/logging";
+import { installLogCountMetric } from "@gitpod/gitpod-protocol/lib/util/logging-node";
 import { DebugApp } from "@gitpod/gitpod-protocol/lib/util/debug-app";
-import { MessageBusIntegration } from "./messagebus-integration";
 import { TypeORM } from "@gitpod/gitpod-db/lib/typeorm/typeorm";
 import { TracingManager } from "@gitpod/gitpod-protocol/lib/util/tracing";
 import { ClusterServiceServer } from "./cluster-service-server";
 import { BridgeController } from "./bridge-controller";
-import { ClusterSyncService } from "./cluster-sync-service";
 import { AppClusterWorkspaceInstancesController } from "./app-cluster-instance-controller";
+import { redisMetricsRegistry } from "@gitpod/gitpod-db/lib";
+import { health, startHealthEndpoint } from "./healthz";
 
 log.enableJSONLogging("ws-manager-bridge", undefined, LogrusLogLevel.getFromEnv());
+installLogCountMetric();
 
 export const start = async (container: Container) => {
+    process.on("uncaughtException", function (err) {
+        // fix for https://github.com/grpc/grpc-node/blob/master/packages/grpc-js/src/load-balancer-pick-first.ts#L309
+        if (err && err.message && err.message.includes("reading 'startConnecting'")) {
+            log.error("uncaughtException", err);
+        } else {
+            throw err;
+        }
+    });
+
     try {
+        startHealthEndpoint();
         const db = container.get(TypeORM);
         await db.connect();
-
-        const msgbus = container.get(MessageBusIntegration);
-        await msgbus.connect();
 
         const tracingManager = container.get(TracingManager);
         tracingManager.setup("ws-manager-bridge");
@@ -34,7 +43,9 @@ export const start = async (container: Container) => {
         prometheusClient.collectDefaultMetrics();
         metricsApp.get("/metrics", async (req, res) => {
             res.set("Content-Type", prometheusClient.register.contentType);
-            res.send(await prometheusClient.register.metrics());
+
+            const mergedRegistry = prometheusClient.Registry.merge([prometheusClient.register, redisMetricsRegistry()]);
+            res.send(await mergedRegistry.metrics());
         });
         const metricsPort = 9500;
         const metricsHttpServer = metricsApp.listen(metricsPort, "localhost", () => {
@@ -49,9 +60,6 @@ export const start = async (container: Container) => {
 
         const clusterServiceServer = container.get<ClusterServiceServer>(ClusterServiceServer);
         await clusterServiceServer.start();
-
-        const clusterSyncService = container.get<ClusterSyncService>(ClusterSyncService);
-        clusterSyncService.start();
 
         const appClusterInstanceController = container.get<AppClusterWorkspaceInstancesController>(
             AppClusterWorkspaceInstancesController,
@@ -73,9 +81,11 @@ export const start = async (container: Container) => {
             appClusterInstanceController.dispose();
         });
         log.info("ws-manager-bridge is up and running");
+        health.isHealthy = true;
         await new Promise((rs, rj) => {});
     } catch (err) {
         log.error("Error during startup. Exiting.", err);
+        health.isHealthy = false;
         process.exit(1);
     }
 };

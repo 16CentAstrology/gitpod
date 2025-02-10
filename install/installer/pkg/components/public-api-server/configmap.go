@@ -6,8 +6,6 @@ package public_api_server
 
 import (
 	"fmt"
-	"net"
-	"strconv"
 
 	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
 	"k8s.io/utils/pointer"
@@ -16,6 +14,9 @@ import (
 	"github.com/gitpod-io/gitpod/components/public-api/go/config"
 
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
+	"github.com/gitpod-io/gitpod/installer/pkg/components/auth"
+	"github.com/gitpod-io/gitpod/installer/pkg/components/redis"
+	"github.com/gitpod-io/gitpod/installer/pkg/components/server"
 	"github.com/gitpod-io/gitpod/installer/pkg/components/usage"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +31,8 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 	var stripeSecretPath string
 	var personalAccessTokenSigningKeyPath string
 
+	publicUrl := fmt.Sprintf("https://services.%s", ctx.Config.Domain)
+
 	_ = ctx.WithExperimental(func(cfg *experimental.Config) error {
 		_, _, stripeSecretPath, _ = getStripeConfig(cfg)
 		return nil
@@ -40,11 +43,49 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 		return nil
 	})
 
+	_ = ctx.WithExperimental(func(cfg *experimental.Config) error {
+		if cfg.WebApp != nil && cfg.WebApp.PublicURL != "" {
+			publicUrl = cfg.WebApp.PublicURL
+		}
+		return nil
+	})
+
+	_, _, databaseSecretMountPath := common.DatabaseEnvSecret(ctx.Config)
+
+	_, _, authCfg := auth.GetConfig(ctx)
+	redisCfg := redis.GetConfiguration(ctx)
+
 	cfg := config.Configuration{
-		GitpodServiceURL:                  fmt.Sprintf("wss://%s", ctx.Config.Domain),
+		PublicURL:                         publicUrl,
+		GitpodServiceURL:                  common.ClusterURL("ws", server.Component, ctx.Namespace, server.ContainerPort),
 		StripeWebhookSigningSecretPath:    stripeSecretPath,
 		PersonalAccessTokenSigningKeyPath: personalAccessTokenSigningKeyPath,
-		BillingServiceAddress:             net.JoinHostPort(fmt.Sprintf("%s.%s.svc.cluster.local", usage.Component, ctx.Namespace), strconv.Itoa(usage.GRPCServicePort)),
+		BillingServiceAddress:             common.ClusterAddress(usage.Component, ctx.Namespace, usage.GRPCServicePort),
+		SessionServiceAddress:             common.ClusterAddress(common.ServerComponent, ctx.Namespace, common.ServerIAMSessionPort),
+		DatabaseConfigPath:                databaseSecretMountPath,
+		Redis: config.RedisConfiguration{
+			Address: redisCfg.Address,
+		},
+		Auth: config.AuthConfiguration{
+			PKI: config.AuthPKIConfiguration{
+				Signing: config.KeyPair{
+					ID:             authCfg.PKI.Signing.ID,
+					PublicKeyPath:  authCfg.PKI.Signing.PublicKeyPath,
+					PrivateKeyPath: authCfg.PKI.Signing.PrivateKeyPath,
+				},
+			},
+			Session: config.SessionConfig{
+				LifetimeSeconds: authCfg.Session.LifetimeSeconds,
+				Issuer:          authCfg.Session.Issuer,
+				Cookie: config.CookieConfig{
+					Name:     authCfg.Session.Cookie.Name,
+					MaxAge:   authCfg.Session.Cookie.MaxAge,
+					SameSite: authCfg.Session.Cookie.SameSite,
+					Secure:   authCfg.Session.Cookie.Secure,
+					HTTPOnly: authCfg.Session.Cookie.HTTPOnly,
+				},
+			},
+		},
 		Server: &baseserver.Configuration{
 			Services: baseserver.ServicesConfiguration{
 				GRPC: &baseserver.ServerConfiguration{

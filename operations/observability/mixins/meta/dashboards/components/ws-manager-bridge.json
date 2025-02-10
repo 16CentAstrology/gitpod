@@ -21,7 +21,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "id": 60,
+  "id": 65,
   "links": [],
   "liveNow": false,
   "panels": [
@@ -62,6 +62,7 @@
             "mode": "palette-classic"
           },
           "custom": {
+            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "# of events",
@@ -75,6 +76,7 @@
               "tooltip": false,
               "viz": false
             },
+            "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
@@ -104,7 +106,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unitScale": true
         },
         "overrides": []
       },
@@ -166,6 +169,7 @@
             "mode": "palette-classic"
           },
           "custom": {
+            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "# of events",
@@ -179,6 +183,7 @@
               "tooltip": false,
               "viz": false
             },
+            "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
@@ -208,7 +213,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unitScale": true
         },
         "overrides": []
       },
@@ -238,7 +244,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(increase(gitpod_ws_manager_bridge_workspace_instance_update_started_total{db_write=\"true\", cluster=~\"$cluster\", pod=~\"$pod\"}[10m])) - sum(increase(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_count{db_write=\"true\", cluster=~\"$cluster\", pod=~\"$pod\"}[10m]))",
+          "expr": "sum(increase(gitpod_ws_manager_bridge_workspace_instance_update_started_total{cluster=~\"$cluster\", pod=~\"$pod\"}[10m])) - sum(increase(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_count{cluster=~\"$cluster\", pod=~\"$pod\"}[10m]))",
           "legendFormat": "# of events received - # of events completed",
           "range": true,
           "refId": "A"
@@ -259,6 +265,7 @@
             "mode": "palette-classic"
           },
           "custom": {
+            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "# of events",
@@ -272,6 +279,7 @@
               "tooltip": false,
               "viz": false
             },
+            "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
@@ -301,7 +309,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unitScale": true
         },
         "overrides": []
       },
@@ -331,7 +340,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(increase(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_count{outcome=\"success\", db_write=\"true\"}[1m])) OR 0",
+          "expr": "sum(increase(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_count{outcome=\"success\"}[1m])) OR 0",
           "interval": "",
           "legendFormat": "success",
           "range": true,
@@ -343,7 +352,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(increase(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_count{outcome=\"error\", db_write=\"true\"}[1m])) OR 0",
+          "expr": "sum(increase(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_count{outcome=\"error\"}[1m])) OR 0",
           "hide": false,
           "interval": "",
           "legendFormat": "error",
@@ -366,6 +375,7 @@
             "mode": "palette-classic"
           },
           "custom": {
+            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -379,6 +389,7 @@
               "tooltip": false,
               "viz": false
             },
+            "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
@@ -408,7 +419,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unitScale": true
         },
         "overrides": []
       },
@@ -448,6 +460,115 @@
       "type": "timeseries"
     },
     {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 61,
+      "panels": [],
+      "title": "Updates Published",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unitScale": true
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "id": 62,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(gitpod_ws_manager_bridge_updates_published_total[1m])) by (type)",
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Event updates by type published to Redis",
+      "type": "timeseries"
+    },
+    {
       "collapsed": true,
       "datasource": {
         "type": "datasource",
@@ -457,7 +578,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 26
       },
       "id": 16,
       "panels": [
@@ -505,8 +626,7 @@
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green",
-                    "value": null
+                    "color": "green"
                   },
                   {
                     "color": "red",
@@ -521,7 +641,7 @@
             "h": 7,
             "w": 10,
             "x": 0,
-            "y": 26
+            "y": 34
           },
           "id": 44,
           "options": {
@@ -567,7 +687,7 @@
             "h": 7,
             "w": 7,
             "x": 10,
-            "y": 26
+            "y": 34
           },
           "hiddenSeries": false,
           "id": 2,
@@ -657,7 +777,7 @@
             "h": 7,
             "w": 7,
             "x": 17,
-            "y": 26
+            "y": 34
           },
           "hiddenSeries": false,
           "id": 4,
@@ -758,7 +878,7 @@
             "h": 7,
             "w": 12,
             "x": 0,
-            "y": 33
+            "y": 41
           },
           "hiddenSeries": false,
           "id": 6,
@@ -846,7 +966,7 @@
             "h": 7,
             "w": 12,
             "x": 12,
-            "y": 33
+            "y": 41
           },
           "hiddenSeries": false,
           "id": 8,
@@ -933,7 +1053,7 @@
             "h": 7,
             "w": 8,
             "x": 0,
-            "y": 40
+            "y": 48
           },
           "hiddenSeries": false,
           "id": 10,
@@ -1029,7 +1149,7 @@
             "h": 7,
             "w": 8,
             "x": 8,
-            "y": 40
+            "y": 48
           },
           "hiddenSeries": false,
           "id": 40,
@@ -1127,7 +1247,7 @@
             "h": 7,
             "w": 8,
             "x": 16,
-            "y": 40
+            "y": 48
           },
           "hiddenSeries": false,
           "id": 42,
@@ -1226,7 +1346,7 @@
             "h": 9,
             "w": 8,
             "x": 0,
-            "y": 47
+            "y": 55
           },
           "hiddenSeries": false,
           "id": 32,
@@ -1315,7 +1435,7 @@
             "h": 9,
             "w": 8,
             "x": 8,
-            "y": 47
+            "y": 55
           },
           "hiddenSeries": false,
           "id": 38,
@@ -1422,7 +1542,7 @@
             "h": 9,
             "w": 8,
             "x": 16,
-            "y": 47
+            "y": 55
           },
           "hiddenSeries": false,
           "id": 36,
@@ -1559,8 +1679,7 @@
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green",
-                    "value": null
+                    "color": "green"
                   },
                   {
                     "color": "red",
@@ -1575,7 +1694,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 56
+            "y": 64
           },
           "id": 54,
           "options": {
@@ -1597,7 +1716,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.5, sum(rate(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_bucket{db_write=\"true\", cluster=~\"$cluster\", pod=~\"$pod\"}[5m])) by (le))",
+              "expr": "histogram_quantile(0.5, sum(rate(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_bucket{cluster=~\"$cluster\", pod=~\"$pod\"}[5m])) by (le))",
               "legendFormat": "50th",
               "range": true,
               "refId": "A"
@@ -1608,7 +1727,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.90, sum(rate(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_bucket{db_write=\"true\", cluster=~\"$cluster\", pod=~\"$pod\"}[5m])) by (le))",
+              "expr": "histogram_quantile(0.90, sum(rate(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_bucket{cluster=~\"$cluster\", pod=~\"$pod\"}[5m])) by (le))",
               "hide": false,
               "legendFormat": "90th",
               "range": true,
@@ -1620,7 +1739,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum(rate(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_bucket{db_write=\"true\", cluster=~\"$cluster\", pod=~\"$pod\"}[5m])) by (le))",
+              "expr": "histogram_quantile(0.99, sum(rate(gitpod_ws_manager_bridge_workspace_instance_update_completed_seconds_bucket{cluster=~\"$cluster\", pod=~\"$pod\"}[5m])) by (le))",
               "hide": false,
               "legendFormat": "99th",
               "range": true,
@@ -1653,7 +1772,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 27
       },
       "id": 22,
       "panels": [
@@ -1671,7 +1790,7 @@
             "h": 9,
             "w": 12,
             "x": 0,
-            "y": 27
+            "y": 35
           },
           "hiddenSeries": false,
           "id": 24,
@@ -1760,7 +1879,7 @@
             "h": 9,
             "w": 12,
             "x": 12,
-            "y": 27
+            "y": 35
           },
           "hiddenSeries": false,
           "id": 26,
@@ -1862,7 +1981,7 @@
             "h": 9,
             "w": 12,
             "x": 0,
-            "y": 36
+            "y": 44
           },
           "hiddenSeries": false,
           "id": 28,
@@ -1954,7 +2073,7 @@
             "h": 9,
             "w": 12,
             "x": 12,
-            "y": 36
+            "y": 44
           },
           "hiddenSeries": false,
           "id": 30,
@@ -2040,8 +2159,7 @@
     }
   ],
   "refresh": "30s",
-  "schemaVersion": 37,
-  "style": "dark",
+  "schemaVersion": 39,
   "tags": [
     "gitpod-mixin"
   ],
@@ -2068,7 +2186,7 @@
           "query": "label_values(up{job=\"ws-manager-bridge\"}, cluster)",
           "refId": "StandardVariableQuery"
         },
-        "refresh": 1,
+        "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,
@@ -2098,7 +2216,7 @@
           "query": "label_values(container_cpu_usage_seconds_total{cluster=~\"$cluster\", pod=~\"ws-manager-bridge.*\"}, node)",
           "refId": "StandardVariableQuery"
         },
-        "refresh": 1,
+        "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,
@@ -2128,7 +2246,7 @@
           "query": "label_values(container_cpu_usage_seconds_total{cluster=~\"$cluster\", node=~\"$node\", pod=~\"ws-manager-bridge.*\"}, pod)",
           "refId": "StandardVariableQuery"
         },
-        "refresh": 1,
+        "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,
@@ -2141,7 +2259,7 @@
         "current": {
           "selected": false,
           "text": "VictoriaMetrics",
-          "value": "VictoriaMetrics"
+          "value": "P4169E866C3094E38"
         },
         "hide": 0,
         "includeAll": false,

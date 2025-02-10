@@ -9,7 +9,7 @@ import (
 	"github.com/gitpod-io/gitpod/installer/pkg/cluster"
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
 
-	wsmanager "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager"
+	wsmanagermk2 "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager-mk2"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -28,23 +28,23 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 		return nil, err
 	}
 
-	var volumes []corev1.Volume
-	var volumeMounts []corev1.VolumeMount
-	if ctx.Config.Certificate.Name != "" {
-		volumes = append(volumes, corev1.Volume{
+	volumes := []corev1.Volume{
+		{
 			Name: "config-certificates",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: ctx.Config.Certificate.Name,
 				},
 			},
-		})
-
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "config-certificates",
-			MountPath: "/mnt/certificates",
-		})
+		},
 	}
+
+	volumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "config-certificates",
+			MountPath: "/mnt/certificates"},
+	}
+
 	if ctx.Config.SSHGatewayHostKey != nil {
 		volumes = append(volumes, corev1.Volume{
 			Name: "host-key",
@@ -61,37 +61,54 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 		})
 	}
 
-	podSpec := corev1.PodSpec{
-		PriorityClassName: common.SystemNodeCritical,
-		Affinity:          common.NodeAffinity(cluster.AffinityLabelWorkspaceServices),
-		TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
-			{
-				LabelSelector:     &metav1.LabelSelector{MatchLabels: common.DefaultLabels(Component)},
-				MaxSkew:           1,
-				TopologyKey:       "kubernetes.io/hostname",
-				WhenUnsatisfiable: corev1.DoNotSchedule,
+	if ctx.Config.SSHGatewayCAKey != nil {
+		volumes = append(volumes, corev1.Volume{
+			Name: "ca-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: ctx.Config.SSHGatewayCAKey.Name,
+					Optional:   pointer.Bool(true),
+				},
 			},
-		},
-		EnableServiceLinks: pointer.Bool(false),
-		ServiceAccountName: Component,
+		})
+
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "ca-key",
+			MountPath: "/mnt/ca-key/ca.key",
+			SubPath:   "ca.key",
+			ReadOnly:  true,
+		})
+	}
+
+	podSpec := corev1.PodSpec{
+		PriorityClassName:         common.SystemNodeCritical,
+		Affinity:                  cluster.WithNodeAffinityHostnameAntiAffinity(Component, cluster.AffinityLabelServices),
+		TopologySpreadConstraints: cluster.WithHostnameTopologySpread(Component),
+		EnableServiceLinks:        pointer.Bool(false),
+		ServiceAccountName:        Component,
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsUser: pointer.Int64(31002),
 		},
-		Volumes: append([]corev1.Volume{{
-			Name: "config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: Component},
+		TerminationGracePeriodSeconds: pointer.Int64(360),
+		Volumes: append([]corev1.Volume{
+			{
+				Name: "config",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: Component},
+					},
 				},
 			},
-		}, {
-			Name: "ws-manager-client-tls-certs",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: wsmanager.TLSSecretNameClient,
+			{
+				Name: "ws-manager-client-tls-certs",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: wsmanagermk2.TLSSecretNameClient,
+					},
 				},
 			},
-		}}, volumes...),
+			common.CAVolume(),
+		}, volumes...),
 		Containers: []corev1.Container{{
 			Name:            Component,
 			Args:            []string{"run", "/config/config.json"},
@@ -112,6 +129,9 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 			}, {
 				Name:          baseserver.BuiltinMetricsPortName,
 				ContainerPort: baseserver.BuiltinMetricsPort,
+			}, {
+				Name:          SSHPortName,
+				ContainerPort: SSHServicePort,
 			}},
 			SecurityContext: &corev1.SecurityContext{
 				Privileged:               pointer.Bool(false),
@@ -121,6 +141,8 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 				common.DefaultEnv(&ctx.Config),
 				common.WorkspaceTracingEnv(ctx, Component),
 				common.AnalyticsEnv(&ctx.Config),
+				// ws-proxy and proxy may not in the same cluster
+				common.ConfigcatEnvOutOfCluster(ctx),
 			)),
 			ReadinessProbe: &corev1.Probe{
 				InitialDelaySeconds: int32(2),
@@ -146,26 +168,22 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 					},
 				},
 			},
-			VolumeMounts: append([]corev1.VolumeMount{{
-				Name:      "config",
-				MountPath: "/config",
-				ReadOnly:  true,
-			}, {
-				Name:      "ws-manager-client-tls-certs",
-				MountPath: "/ws-manager-client-tls-certs",
-				ReadOnly:  true,
-			}}, volumeMounts...),
+			VolumeMounts: append([]corev1.VolumeMount{
+				{
+					Name:      "config",
+					MountPath: "/config",
+					ReadOnly:  true,
+				},
+				{
+					Name:      "ws-manager-client-tls-certs",
+					MountPath: "/ws-manager-client-tls-certs",
+					ReadOnly:  true,
+				},
+				common.CAVolumeMount(),
+			}, volumeMounts...),
 		},
 			*common.KubeRBACProxyContainer(ctx),
 		},
-	}
-
-	if vol, mnt, env, ok := common.CustomCACertVolume(ctx); ok {
-		podSpec.Volumes = append(podSpec.Volumes, *vol)
-		pod := podSpec.Containers[0]
-		pod.VolumeMounts = append(pod.VolumeMounts, *mnt)
-		pod.Env = append(pod.Env, env...)
-		podSpec.Containers[0] = pod
 	}
 
 	return []runtime.Object{

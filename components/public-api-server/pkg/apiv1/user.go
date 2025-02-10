@@ -8,6 +8,7 @@ import (
 	"context"
 
 	connect "github.com/bufbuild/connect-go"
+	"github.com/gitpod-io/gitpod/common-go/log"
 	v1 "github.com/gitpod-io/gitpod/components/public-api/go/experimental/v1"
 	"github.com/gitpod-io/gitpod/components/public-api/go/experimental/v1/v1connect"
 	protocol "github.com/gitpod-io/gitpod/gitpod-protocol"
@@ -38,6 +39,7 @@ func (s *UserService) GetAuthenticatedUser(ctx context.Context, req *connect.Req
 	if err != nil {
 		return nil, proxy.ConvertError(err)
 	}
+	log.AddFields(ctx, log.UserID(user.ID))
 
 	response := userToAPIResponse(user)
 
@@ -95,7 +97,7 @@ func userToAPIResponse(user *protocol.User) *v1.User {
 		Id:        user.ID,
 		Name:      name,
 		AvatarUrl: user.AvatarURL,
-		CreatedAt: parseTimeStamp(user.CreationDate),
+		CreatedAt: parseGitpodTimeStampOrDefault(user.CreationDate),
 	}
 }
 
@@ -104,7 +106,7 @@ func sshKeyToAPIResponse(key *protocol.UserSSHPublicKeyValue) *v1.SSHKey {
 		Id:        key.ID,
 		Name:      key.Name,
 		Key:       key.Key,
-		CreatedAt: parseTimeStamp(key.CreationTime),
+		CreatedAt: parseGitpodTimeStampOrDefault(key.CreationTime),
 	}
 }
 

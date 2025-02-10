@@ -29,6 +29,8 @@ message RegisterRequest {
   TlsConfig tls = 3;
   RegistrationHints hints = 4;
   repeated AdmissionConstraint admission_constraints = 5;
+  // the region this cluster is in, e.g. "europe-west1"
+  string region = 7;
 
   // DEPRECATED
   // repeated AdmissionPreference admission_preference = 6;
@@ -46,7 +48,7 @@ message TlsConfig {
 message RegistrationHints {
   Preferability perfereability = 1;
   bool cordoned = 2;
-  bool govern = 3;
+  reserved 3; // bool govern = 3;
 }
 
 message AdmissionConstraint {
@@ -78,11 +80,15 @@ message ClusterStatus {
   bool governed = 6;
   repeated AdmissionConstraint admission_constraint = 7;
   bool static = 8;
-  string application_cluster = 10;
+
+  reserved 10; // string application_cluster = 10;
 
   // DEPRECATED
   // repeated AdmissionPreference admission_preference = 9;
   reserved 9;
+
+  // The region in which this cluster runs
+  string region = 11;
 }
 
 enum ClusterState {
@@ -102,6 +108,8 @@ message UpdateRequest {
 
     // DEPRECATED
     // ModifyAdmissionPreference admission_preference = 6;
+
+    TlsConfig tls = 7;
   }
 }
 

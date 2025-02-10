@@ -6,8 +6,8 @@
 
 import { GitpodHostUrl } from "@gitpod/gitpod-protocol/lib/util/gitpod-host-url";
 
-export const workspaceUrl = GitpodHostUrl.fromWorkspaceUrl(window.location.href);
+export const workspaceUrl = new GitpodHostUrl(window.location.href);
 
 export const serverUrl = workspaceUrl.withoutWorkspacePrefix();
 
-export const startUrl = workspaceUrl.asStart();
+export const startUrl = serverUrl.asStart(workspaceUrl.workspaceId);

@@ -4,23 +4,71 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { getGitpodService } from "./service/service";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
 import Cookies from "js-cookie";
 import { v4 } from "uuid";
-import { Experiment } from "./experiments";
 import { StartWorkspaceError } from "./start/StartPage";
+import { RemoteTrackMessage } from "@gitpod/gitpod-protocol/lib/analytics";
 
 export type Event =
     | "invite_url_requested"
     | "organisation_authorised"
     | "dotfile_repo_changed"
     | "feedback_submitted"
-    | "workspace_class_changed";
+    | "workspace_class_changed"
+    | "privacy_policy_update_accepted"
+    | "browser_extension_promotion_interaction"
+    | "coachmark_dismissed"
+    | "modal_dismiss"
+    | "ide_configuration_changed"
+    | "status_rendered"
+    | "error_rendered"
+    | "video_clicked";
 type InternalEvent = Event | "path_changed" | "dashboard_clicked";
 
-export type EventProperties = TrackOrgAuthorised | TrackInviteUrlRequested | TrackDotfileRepo | TrackFeedback;
-type InternalEventProperties = TrackUIExperiments & (EventProperties | TrackDashboardClick | TrackPathChanged);
+export type EventProperties =
+    | TrackOrgAuthorised
+    | TrackInviteUrlRequested
+    | TrackDotfileRepo
+    | TrackFeedback
+    | TrackPolicyUpdateClick
+    | TrackBrowserExtensionPromotionInteraction
+    | TrackModalDismiss
+    | TrackIDEConfigurationChanged
+    | TrackWorkspaceClassChanged
+    | TrackStatusRendered
+    | TrackErrorRendered
+    | TrackVideoClicked;
+type InternalEventProperties = EventProperties | TrackDashboardClick | TrackPathChanged;
+
+export interface TrackErrorRendered {
+    sessionId: string;
+    instanceId?: string;
+    workspaceId: string;
+    type: string;
+    error: any;
+}
+
+export interface TrackStatusRendered {
+    sessionId: string;
+    instanceId?: string;
+    workspaceId: string;
+    type: string;
+    phase?: string;
+}
+
+export interface TrackWorkspaceClassChanged {}
+export interface TrackIDEConfigurationChanged {
+    location: string;
+    name?: string;
+    version?: string;
+}
+export interface TrackModalDismiss {
+    manner: string;
+    title?: string;
+    specify?: string;
+    path: string;
+}
 
 export interface TrackOrgAuthorised {
     installation_id: string;
@@ -44,6 +92,26 @@ export interface TrackFeedback {
     error_object?: StartWorkspaceError;
     error_message?: string;
 }
+
+export interface TrackPolicyUpdateClick {
+    path: string;
+    success: boolean;
+}
+
+export interface TrackCoachmarkDismissed {
+    name: string;
+    success: boolean;
+}
+
+export interface TrackBrowserExtensionPromotionInteraction {
+    action: "chrome_navigation" | "firefox_navigation" | "manually_dismissed";
+}
+
+export interface TrackVideoClicked {
+    context: string;
+    path: string;
+}
+
 interface TrackDashboardClick {
     dnt?: boolean;
     path: string;
@@ -57,10 +125,6 @@ interface TrackPathChanged {
     path: string;
 }
 
-interface TrackUIExperiments {
-    ui_experiments?: {};
-}
-
 interface Traits {
     unsubscribed_onboarding?: boolean;
     unsubscribed_changelog?: boolean;
@@ -68,19 +132,45 @@ interface Traits {
 }
 
 //call this to track all events outside of button and anchor clicks
-export const trackEvent = (event: Event, properties: EventProperties) => {
+export function trackEvent(event: "invite_url_requested", properties: TrackInviteUrlRequested): void;
+export function trackEvent(event: "organisation_authorised", properties: TrackOrgAuthorised): void;
+export function trackEvent(event: "dotfile_repo_changed", properties: TrackDotfileRepo): void;
+export function trackEvent(event: "feedback_submitted", properties: TrackFeedback): void;
+export function trackEvent(event: "workspace_class_changed", properties: TrackWorkspaceClassChanged): void;
+export function trackEvent(event: "privacy_policy_update_accepted", properties: TrackPolicyUpdateClick): void;
+export function trackEvent(event: "coachmark_dismissed", properties: TrackCoachmarkDismissed): void;
+export function trackEvent(
+    event: "browser_extension_promotion_interaction",
+    properties: TrackBrowserExtensionPromotionInteraction,
+): void;
+export function trackEvent(event: "modal_dismiss", properties: TrackModalDismiss): void;
+export function trackEvent(event: "ide_configuration_changed", properties: TrackIDEConfigurationChanged): void;
+export function trackEvent(event: "status_rendered", properties: TrackStatusRendered): void;
+export function trackEvent(event: "error_rendered", properties: TrackErrorRendered): void;
+export function trackEvent(event: "video_clicked", properties: TrackVideoClicked): void;
+export function trackEvent(event: Event, properties: EventProperties): void {
     trackEventInternal(event, properties);
-};
+}
 
 const trackEventInternal = (event: InternalEvent, properties: InternalEventProperties) => {
-    properties.ui_experiments = Experiment.get();
-
-    getGitpodService().server.trackEvent({
+    sendTrackEvent({
         anonymousId: getAnonymousId(),
         event,
         properties,
     });
 };
+
+// Please use trackEvent instead of this function
+export function sendTrackEvent(message: RemoteTrackMessage): void {
+    sendAnalytics("trackEvent", message);
+}
+
+export function trackVideoClick(context: string) {
+    trackEvent("video_clicked", {
+        context: context,
+        path: window.location.pathname,
+    });
+}
 
 export const trackButtonOrAnchor = (target: HTMLAnchorElement | HTMLButtonElement | HTMLDivElement) => {
     //read manually passed analytics props from 'data-analytics' attribute of event target
@@ -98,7 +188,7 @@ export const trackButtonOrAnchor = (target: HTMLAnchorElement | HTMLButtonElemen
 
     let trackingMsg: TrackDashboardClick = {
         path: window.location.pathname,
-        label: target.textContent || undefined,
+        label: target.ariaLabel || target.textContent || undefined,
     };
 
     if (target instanceof HTMLButtonElement || target instanceof HTMLDivElement) {
@@ -142,7 +232,7 @@ export const trackPathChange = (props: TrackPathChanged) => {
     trackEventInternal("path_changed", props);
 };
 
-type TrackLocationProperties = TrackUIExperiments & {
+type TrackLocationProperties = {
     referrer: string;
     path: string;
     host: string;
@@ -155,10 +245,9 @@ export const trackLocation = async (includePII: boolean) => {
         path: window.location.pathname,
         host: window.location.hostname,
         url: window.location.href,
-        ui_experiments: Experiment.get(),
     };
 
-    getGitpodService().server.trackLocation({
+    sendAnalytics("trackLocation", {
         //if the user is authenticated, let server determine the id. else, pass anonymousId explicitly.
         includePII: includePII,
         anonymousId: getAnonymousId(),
@@ -167,11 +256,22 @@ export const trackLocation = async (includePII: boolean) => {
 };
 
 export const identifyUser = async (traits: Traits) => {
-    getGitpodService().server.identifyUser({
+    sendAnalytics("identifyUser", {
         anonymousId: getAnonymousId(),
         traits: traits,
     });
 };
+
+function sendAnalytics(operation: "trackEvent" | "trackLocation" | "identifyUser", message: any) {
+    fetch("/_analytics/" + operation, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(message),
+        credentials: "include",
+    });
+}
 
 const getCookieConsent = () => {
     return Cookies.get("gp-analytical") === "true";

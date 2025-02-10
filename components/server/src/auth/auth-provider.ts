@@ -4,38 +4,36 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import * as express from "express";
-import { AuthProviderInfo, User, OAuth2Config, AuthProviderEntry } from "@gitpod/gitpod-protocol";
-import { saveSession } from "../express-util";
-import { Session } from "../express";
+import express from "express";
+import { AuthProviderInfo, User, AuthProviderEntry, Token } from "@gitpod/gitpod-protocol";
 
 import { UserEnvVarValue } from "@gitpod/gitpod-protocol";
 
 export const AuthProviderParams = Symbol("AuthProviderParams");
 export interface AuthProviderParams extends AuthProviderEntry {
-    readonly builtin: boolean; // true, if `ownerId` == ""
-    readonly verified: boolean; // true, if `status` == "verified"
+    /**
+     * computed value: `true`, if `ownerId` == ""
+     */
+    readonly builtin: boolean;
+    /**
+     * computed value: `true`, if `status` == "verified"
+     */
+    readonly verified: boolean;
 
-    readonly oauth: OAuth2Config & {
-        // extending:
-        readonly configFn?: string;
-    };
-
-    // for special auth providers only
-    readonly params?: {
-        [key: string]: string;
-        readonly authUrl: string;
-        readonly callBackUrl: string;
-        readonly githubToken: string;
-    };
-
-    // properties to control behavior
     readonly hiddenOnDashboard?: boolean;
-    readonly loginContextMatcher?: string;
-    readonly disallowLogin?: boolean;
-    readonly requireTOS?: boolean;
 
+    /**
+     * @deprecated unused
+     */
+    readonly disallowLogin?: boolean;
+
+    /**
+     * @deprecated unused
+     */
     readonly description: string;
+    /**
+     * @deprecated unused
+     */
     readonly icon: string;
 }
 export function parseAuthProviderParamsFromEnv(json: object): AuthProviderParams[] {
@@ -84,8 +82,15 @@ export interface AuthProvider {
     readonly info: AuthProviderInfo;
     readonly authCallbackPath: string;
     callback(req: express.Request, res: express.Response, next: express.NextFunction): Promise<void>;
-    authorize(req: express.Request, res: express.Response, next: express.NextFunction, scopes?: string[]): void;
-    refreshToken?(user: User): Promise<void>;
+    authorize(
+        req: express.Request,
+        res: express.Response,
+        next: express.NextFunction,
+        state: string,
+        scopes?: string[],
+    ): void;
+    refreshToken?(user: User, requestedLifetimeDate: Date): Promise<Token>;
+    requiresOpportunisticRefresh?(): boolean;
 }
 
 export interface AuthFlow {
@@ -94,19 +99,18 @@ export interface AuthFlow {
     readonly overrideScopes?: boolean;
 }
 export namespace AuthFlow {
-    export function get(session: Session | undefined): AuthFlow | undefined {
-        if (session) {
-            return session.authFlow;
+    export function is(obj: any): obj is AuthFlow {
+        if (obj === undefined) {
+            return false;
         }
-    }
-    export async function attach(session: Session, authFlow: AuthFlow): Promise<void> {
-        session.authFlow = authFlow;
-        return saveSession(session);
-    }
-    export async function clear(session: Session | undefined) {
-        if (session) {
-            session.authFlow = undefined;
-            return saveSession(session);
+        if (typeof obj !== "object") {
+            return false;
         }
+
+        if (!("host" in obj) || !("returnTo" in obj)) {
+            return false;
+        }
+
+        return true;
     }
 }

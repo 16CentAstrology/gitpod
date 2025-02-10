@@ -2,34 +2,30 @@
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM alpine:3.16 as base_builder
-RUN mkdir /ide-desktop
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:1ec3327af43d7af231ffe475aff88d49dbb5e09af9f28610e6afbd2cb096e751 as base_builder
+ARG JETBRAINS_DOWNLOAD_QUALIFIER
+ARG SUPERVISOR_IDE_CONFIG
+ARG JETBRAINS_BACKEND_VERSION
+
+RUN apk add --no-cache jq
+
+COPY ${SUPERVISOR_IDE_CONFIG} /tmp/supervisor-ide-config-template.json
+RUN jq --arg JETBRAINS_BACKEND_VERSION "$JETBRAINS_BACKEND_VERSION" '.version = $JETBRAINS_BACKEND_VERSION' /tmp/supervisor-ide-config-template.json > /tmp/supervisor-ide-config.json
+
+RUN mkdir /ide-desktop \
+    && mkdir /ide-desktop/${JETBRAINS_DOWNLOAD_QUALIFIER} \
+    # for backward compatibility with older supervisor, remove in the future
+    && cp /tmp/supervisor-ide-config.json /ide-desktop/supervisor-ide-config.json \
+    && cp /tmp/supervisor-ide-config.json /ide-desktop/${JETBRAINS_DOWNLOAD_QUALIFIER}/supervisor-ide-config.json
 
 # for debugging
-# FROM alpine:3.16
+# FROM cgr.dev/chainguard/wolfi-base:latest@sha256:1ec3327af43d7af231ffe475aff88d49dbb5e09af9f28610e6afbd2cb096e751
 FROM scratch
-ARG JETBRAINS_DOWNLOAD_QUALIFIER
-ARG JETBRAINS_BACKEND_QUALIFIER
 ARG JETBRAINS_BACKEND_VERSION
-ARG SUPERVISOR_IDE_CONFIG
+ARG JETBRAINS_DOWNLOAD_QUALIFIER
 # ensures right permissions for /ide-desktop
 COPY --from=base_builder --chown=33333:33333 /ide-desktop/ /ide-desktop/
-COPY --chown=33333:33333 ${SUPERVISOR_IDE_CONFIG} /ide-desktop/supervisor-ide-config.json
 COPY --chown=33333:33333 components-ide-jetbrains-image--download-${JETBRAINS_DOWNLOAD_QUALIFIER}/backend /ide-desktop/${JETBRAINS_DOWNLOAD_QUALIFIER}/backend
-COPY --chown=33333:33333 components-ide-jetbrains-image-status--app/status /ide-desktop/${JETBRAINS_DOWNLOAD_QUALIFIER}
-
-ARG JETBRAINS_BACKEND_QUALIFIER
-ENV GITPOD_ENV_SET_JETBRAINS_BACKEND_QUALIFIER ${JETBRAINS_BACKEND_QUALIFIER}
-
 COPY --chown=33333:33333 components-ide-jetbrains-cli--app/cli /ide-desktop/${JETBRAINS_DOWNLOAD_QUALIFIER}/bin/idea-cli
-ENV GITPOD_ENV_APPEND_PATH /ide-desktop/${JETBRAINS_DOWNLOAD_QUALIFIER}/bin:
-
-# editor config
-ENV GITPOD_ENV_SET_EDITOR "/ide-desktop/${JETBRAINS_DOWNLOAD_QUALIFIER}/bin/idea-cli open"
-ENV GITPOD_ENV_SET_VISUAL "$GITPOD_ENV_SET_EDITOR"
-ENV GITPOD_ENV_SET_GP_OPEN_EDITOR "$GITPOD_ENV_SET_EDITOR"
-ENV GITPOD_ENV_SET_GIT_EDITOR "$GITPOD_ENV_SET_EDITOR --wait"
-ENV GITPOD_ENV_SET_GP_PREVIEW_BROWSER "/ide-desktop/${JETBRAINS_DOWNLOAD_QUALIFIER}/bin/idea-cli preview"
-ENV GITPOD_ENV_SET_GP_EXTERNAL_BROWSER "/ide-desktop/${JETBRAINS_DOWNLOAD_QUALIFIER}/bin/idea-cli preview"
 
 LABEL "io.gitpod.ide.version"=$JETBRAINS_BACKEND_VERSION

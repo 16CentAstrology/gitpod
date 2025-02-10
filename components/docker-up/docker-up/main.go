@@ -25,7 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gitpod-io/gitpod/common-go/cgroups"
 	"github.com/rootless-containers/rootlesskit/pkg/sigproxy"
 	sigproxysignal "github.com/rootless-containers/rootlesskit/pkg/sigproxy/signal"
 	"github.com/sirupsen/logrus"
@@ -59,7 +58,7 @@ var aptUpdated = false
 const (
 	dockerSocketFN = "/var/run/docker.sock"
 	gitpodUserId   = 33333
-	containerIf    = "ceth0"
+	containerIf    = "eth0"
 )
 
 func main() {
@@ -104,18 +103,7 @@ func runWithinNetns() (err error) {
 
 	args := []string{
 		"--data-root=/workspace/.docker-root",
-	}
-
-	unified, err := cgroups.IsUnifiedCgroupSetup()
-	if err != nil {
-		return xerrors.Errorf("could not determine cgroup setup: %w", err)
-	}
-	if !unified {
-		// Enable rootless mode only in cgroup v1 because docker requires systemd when using it in cgroup v2
-		args = append(args,
-			"--experimental",
-			"--rootless",
-		)
+		"--cri-containerd",
 	}
 
 	if opts.Verbose {
@@ -145,7 +133,11 @@ func runWithinNetns() (err error) {
 	// configure docker0 MTU (used as control plane, not related to containers)
 	args = append(args, fmt.Sprintf("--network-control-plane-mtu=%v", netIface.Attrs().MTU))
 
+	// cmp. ENT-324: Required to run dockerd >= 26.1 in a Gitpod workspace
+	os.Setenv("DOCKER_ALLOW_IPV6_ON_IPV4_INTERFACE", "1")
+
 	if listenFDs > 0 {
+
 		os.Setenv("LISTEN_PID", strconv.Itoa(os.Getpid()))
 		args = append(args, "-H", "fd://")
 

@@ -17,6 +17,7 @@ export class DBWithTracing<T> {
     public trace(ctx: TraceContext): T {
         return new Proxy(this.db, {
             get: (_target: any, name: string) => {
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
                 const f = Reflect.get(_target, name);
                 if (!f) {
                     return undefined;
@@ -25,7 +26,11 @@ export class DBWithTracing<T> {
                 return async (...args: any[]) => {
                     // do not try and trace calls with an empty trace context - the callers intention most likely was to omit the trace
                     // so as to not spam the trace logs
-                    if (!ctx.span) {
+                    // Also, opentracing makes some assumptions about the Span object, so this might fail under some circumstances
+                    function isEmptyObject(obj: object): boolean {
+                        return Object.keys(obj).length === 0;
+                    }
+                    if (!ctx.span || isEmptyObject(ctx.span)) {
                         return await f.bind(_target)(...args);
                     }
 
@@ -54,5 +59,4 @@ export function bindDbWithTracing<T>(traceKey: string | symbol, bind: interfaces
 
 export const TracedWorkspaceDB = Symbol("TracedWorkspaceDB");
 export const TracedUserDB = Symbol("TracedUserDB");
-export const TracedLicenseDB = Symbol("TracedLicenseDB");
 export const TracedOneTimeSecretDB = Symbol("TracedOneTimeSecretDB");

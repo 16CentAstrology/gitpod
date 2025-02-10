@@ -12,9 +12,9 @@ import { AuthProviderService } from "./auth-provider-service";
 import { HostContextProvider, HostContextProviderFactory } from "./host-context-provider";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { HostContainerMapping } from "./host-container-mapping";
-import { RepositoryService } from "../repohost/repo-service";
 import { TraceContext } from "@gitpod/gitpod-protocol/lib/util/tracing";
 import { repeat } from "@gitpod/gitpod-protocol/lib/util/repeat";
+import { RepositoryService } from "../repohost/repo-service";
 
 @injectable()
 export class HostContextProviderImpl implements HostContextProvider {
@@ -75,7 +75,7 @@ export class HostContextProviderImpl implements HostContextProvider {
         const knownOAuthRevisions = Array.from(this.dynamicHosts.entries())
             .map(([_, hostContext]) => hostContext.authProvider.params.oauthRevision)
             .filter((rev) => !!rev) as string[];
-        const newAndUpdatedAuthProviders = await this.authProviderService.getAllAuthProviders(knownOAuthRevisions);
+        const newAndUpdatedAuthProviders = await this.authProviderService.getAllAuthProviderParams(knownOAuthRevisions);
         ctx.span?.setTag("updateDynamicHosts.newAndUpdatedAuthProviders", newAndUpdatedAuthProviders.length);
 
         for (const config of newAndUpdatedAuthProviders) {

@@ -5,9 +5,21 @@
  */
 
 import { IssueContext, User, PullRequestContext, Repository, Token } from "@gitpod/gitpod-protocol";
-import { GitHubScope } from "../github/scopes";
-import { GitLabScope } from "../gitlab/scopes";
-import { TokenService } from "../user/token-service";
+import {
+    GitHubOAuthScopes,
+    GitLabOAuthScopes,
+    AzureDevOpsOAuthScopes,
+} from "@gitpod/public-api-common/lib/auth-providers";
+import { AzureDevOpsContextParser } from "../azure-devops/azure-context-parser";
+import { AzureDevOpsApi } from "../azure-devops/azure-api";
+import { AuthProviderParams } from "../auth/auth-provider";
+import { AzureDevOpsTokenHelper } from "../azure-devops/azure-token-helper";
+import { TokenProvider } from "../user/token-provider";
+import { HostContextProvider } from "../auth/host-context-provider";
+import { Container, ContainerModule } from "inversify";
+import { AzureDevOpsFileProvider } from "../azure-devops/azure-file-provider";
+import { AzureDevOpsRepositoryProvider } from "../azure-devops/azure-repository-provider";
+import { Config } from "../config";
 
 export namespace DevData {
     export function createTestUser(): User {
@@ -40,9 +52,14 @@ export namespace DevData {
     }
 
     export function createGitHubTestToken(): Token {
+        if (!process.env.GITPOD_TEST_TOKEN_GITHUB) {
+            console.error(
+                `GITPOD_TEST_TOKEN_GITHUB env var is not set\n\n\t export GITPOD_TEST_TOKEN_GITHUB='{"username": "gitpod-test", "value": $GITHUB_TOKEN}'`,
+            );
+        }
         return {
             ...getTokenFromEnv("GITPOD_TEST_TOKEN_GITHUB"),
-            scopes: [GitHubScope.EMAIL, GitHubScope.PUBLIC, GitHubScope.PRIVATE],
+            scopes: [GitHubOAuthScopes.EMAIL, GitHubOAuthScopes.PUBLIC, GitHubOAuthScopes.PRIVATE],
         };
     }
 
@@ -62,7 +79,14 @@ export namespace DevData {
     export function createGitlabTestToken(): Token {
         return {
             ...getTokenFromEnv("GITPOD_TEST_TOKEN_GITLAB"),
-            scopes: [GitLabScope.READ_USER, GitLabScope.API],
+            scopes: [GitLabOAuthScopes.READ_USER, GitLabOAuthScopes.API],
+        };
+    }
+
+    export function createAzureDevOpsTestToken(): Token {
+        return {
+            ...getTokenFromEnv("GITPOD_TEST_TOKEN_AZURE_DEVOPS"),
+            scopes: [...AzureDevOpsOAuthScopes.DEFAULT],
         };
     }
 
@@ -80,16 +104,6 @@ export namespace DevData {
             throw new Error(`${varname} env var is not set`);
         }
         return JSON.parse(secret);
-    }
-
-    export function createPortAuthTestToken(workspaceId: string): Token {
-        const now = new Date();
-        return {
-            value: "f3d1880e1cae34116bbb863ff524d858ae13573219886ec63e8568380aa744fe",
-            scopes: [TokenService.generateWorkspacePortAuthScope(workspaceId)],
-            updateDate: now.toISOString(),
-            expiryDate: new Date(now.getTime() + TokenService.GITPOD_PORT_AUTH_TOKEN_EXPIRY_MILLIS).toISOString(),
-        };
     }
 
     export function createPrContext(user: User): PullRequestContext {
@@ -126,5 +140,43 @@ export namespace DevData {
             nr: 15,
             revision: "",
         };
+    }
+}
+
+export namespace DevTestHelper {
+    export const AzureTestEnv = "GITPOD_TEST_TOKEN_AZURE_DEVOPS";
+    export function echoAzureTestTips() {
+        if (!process.env[AzureTestEnv]) {
+            console.warn(
+                `No Azure DevOps test token set. Skipping Azure DevOps tests.\n\t export AZURE_TOKEN=<your-token>\nexport ${AzureTestEnv}='{"value": "'$AZURE_TOKEN'"}'`,
+            );
+        }
+    }
+    export function createAzureSCMContainer() {
+        const container = new Container();
+        const AUTH_HOST_CONFIG: Partial<AuthProviderParams> = {
+            id: "0000-Azure-DevOps",
+            type: "AzureDevOps",
+            verified: true,
+            description: "",
+            icon: "",
+            host: "dev.azure.com",
+        };
+        container.load(
+            new ContainerModule((bind, unbind, isBound, rebind) => {
+                bind(Config).toConstantValue({});
+                bind(AzureDevOpsContextParser).toSelf().inSingletonScope();
+                bind(AzureDevOpsApi).toSelf().inSingletonScope();
+                bind(AuthProviderParams).toConstantValue(AUTH_HOST_CONFIG);
+                bind(AzureDevOpsTokenHelper).toSelf().inSingletonScope();
+                bind(TokenProvider).toConstantValue(<TokenProvider>{
+                    getTokenForHost: async () => DevData.createAzureDevOpsTestToken(),
+                });
+                bind(HostContextProvider).toConstantValue(DevData.createDummyHostContextProvider());
+                bind(AzureDevOpsFileProvider).toSelf().inSingletonScope();
+                bind(AzureDevOpsRepositoryProvider).toSelf().inSingletonScope();
+            }),
+        );
+        return container;
     }
 }

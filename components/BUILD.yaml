@@ -13,7 +13,6 @@ packages:
       - :publish-api
       - dev:all-app
       - install/installer:docker
-      - install/kots:lint
       - components/gitpod-protocol:all
   - name: docker-versions
     type: docker
@@ -34,15 +33,18 @@ packages:
       - components/dashboard:docker
       - components/docker-up:docker
       - components/ee/agent-smith:docker
-      - components/ee/db-sync:docker
-      - components/ee/payment-endpoint:docker
       - components/gitpod-db:docker
-      - components/iam:docker
       - components/ide/code-desktop:docker
       - components/ide/code-desktop:docker-insiders
       - components/ide/code:docker
+      - components/ide/code/codehelper:docker
+      - components/ide/code/gitpod-web-extension:docker
+      - components/ide/xterm:docker
+      - components/ide/jetbrains/launcher:docker
       - components/ide/jetbrains/backend-plugin:stable
       - components/ide/jetbrains/backend-plugin:latest
+      - components/ide/jetbrains/backend-plugin:stable-rider
+      - components/ide/jetbrains/backend-plugin:latest-rider
       - components/ide/jetbrains/image:goland
       - components/ide/jetbrains/image:goland-latest
       - components/ide/jetbrains/image:intellij
@@ -59,34 +61,31 @@ packages:
       - components/ide/jetbrains/image:rider-latest
       - components/ide/jetbrains/image:clion
       - components/ide/jetbrains/image:clion-latest
+      - components/ide/jetbrains/image:rustrover
+      - components/ide/jetbrains/image:rustrover-latest
       - components/image-builder-bob:docker
       - components/image-builder-mk3:docker
+      - components/ipfs/ipfs-cluster:docker
+      - components/ipfs/kubo:docker
       - components/local-app:docker
       - components/public-api-server:docker
       - components/usage:docker
       - components/openvsx-proxy:docker
       - components/proxy:docker
       - components/registry-facade:docker
-      - components/registry-facade/ca-updater:docker
       - components/server:docker
       - components/service-waiter:docker
       - components/supervisor:docker
-      - components/toxic-config:docker
-      - components/installation-telemetry:docker
       - components/workspacekit:docker
       - components/ws-daemon:docker
       - components/ws-daemon/seccomp-profile-installer:docker
-      - components/ws-daemon/shiftfs-module-loader:docker
       - components/ws-manager-bridge:docker
-      - components/ws-manager:docker
+      - components/ws-manager-mk2:docker
       - components/ws-proxy:docker
       - components/ide-proxy:docker
       - components/ide-metrics:docker
       - components/ide-service:docker
-      - components/kots-config-check/certificate:docker
-      - components/kots-config-check/database:docker
-      - components/kots-config-check/registry:docker
-      - components/kots-config-check/storage:docker
+      - components/node-labeler:docker
       - test:docker
       - dev/version-manifest:app
     config:
@@ -110,14 +109,11 @@ packages:
   - name: all-apps
     type: generic
     deps:
-      - components/iam:app
       - components/blobserve:app
       - components/content-service:app
       - components/dashboard:app
       - components/docker-up:app
       - components/ee/agent-smith:app
-      - components/ee/db-sync:app
-      - components/ee/payment-endpoint:app
       - components/image-builder-mk3:app
       - components/openvsx-proxy:app
       - components/public-api-server:app
@@ -126,14 +122,13 @@ packages:
       - components/service-waiter:app
       - components/supervisor:app
       - components/supervisor/frontend:app
-      - components/toxic-config:app
-      - components/installation-telemetry:app
       - components/workspacekit:app
       - components/ws-daemon:app
       - components/ws-manager-bridge:app
-      - components/ws-manager:app
       - components/ide-metrics:app
       - components/ide-service:app
+      - components/ide/jetbrains/launcher:app
+      - components/node-labeler:app
 scripts:
   - name: update-license-header
     description: Updates the license header in all source files
@@ -159,7 +154,7 @@ scripts:
     srcs:
       - components/**/*
     script: |
-      GO_COMPONENTS=( local-app-api content-service-api image-builder-api registry-facade-api supervisor-api ws-daemon-api ws-manager-api ws-manager-bridge-api )
+      GO_COMPONENTS=( local-app-api content-service-api image-builder-api registry-facade-api supervisor-api ws-daemon-api ws-manager-api ws-manager-bridge-api usage-api spicedb )
 
       for COMPONENT in "${GO_COMPONENTS[@]}";do
         echo "Generating code for component $COMPONENT..."
@@ -168,7 +163,7 @@ scripts:
         popd > /dev/null
       done
 
-      WEB_COMPONENTS=( local-app-api/typescript-grpcweb supervisor-api/typescript-grpc supervisor-api/typescript-grpcweb )
+      WEB_COMPONENTS=( local-app-api/typescript-grpcweb supervisor-api/typescript-grpc supervisor-api/typescript-grpcweb spicedb/typescript )
       for COMPONENT in "${WEB_COMPONENTS[@]}";do
         echo "Generating code for component $COMPONENT..."
         pushd $COMPONENT > /dev/null
@@ -183,7 +178,7 @@ scripts:
       - test/**/*
       - dev/**/*
     script: |
-      leeway exec --filter-type go -v -- go mod tidy -compat=1.19
+      leeway exec --filter-type go -v -- go mod tidy -compat=1.22
 
       # not all the code is present in leeway.
       # ensure we update everything containing a go.mod file
@@ -191,9 +186,22 @@ scripts:
         DIRECTORY=$(dirname $COMPONENT)
         echo "$DIRECTORY"
         pushd $DIRECTORY > /dev/null
-        go mod tidy -compat=1.19 -v
+        go mod tidy -compat=1.22 -v
         popd > /dev/null
       done
+
+  - name: check-mocha-no-only
+    srcs:
+      - components/**/*
+    script: |
+      if [ "$(git diff --cached | grep "+" | grep "\w+\.only(")" != "" ]; then
+        echo ""
+        echo "COMMIT FAILED:"
+        echo "Some spec files have .only. Please remove only and try committing again."
+        exit 1
+      else
+        exit 0
+      fi
 
   - name: unblock-user
     deps:
@@ -225,7 +233,19 @@ scripts:
         query="update d_b_user set blocked=0 where name=\"$user\";"
         mysql -e "$query" -u$DB_USERNAME -p$DB_PASSWORD -h 127.0.0.1 gitpod
       fi
+
+      printf "\nFGA: Reset fgaRelationshipsVersion for $user...\n"
+      query="update d_b_user set additionalData = JSON_REMOVE(additionalData, '$.fgaRelationshipsVersion') where name=\"$user\";"
+      mysql -e "$query" -u$DB_USERNAME -p$DB_PASSWORD -h 127.0.0.1 gitpod
+      if [ $? -ne 0 ]; then
+        echo "error resetting fgaRelationshipsVersion"
+        kill $PID || true
+        exit 1
+      fi
       kill $PID || true
+
+      printf "\nRestarting server and redis to pick up DB changes...\n"
+      kubectl rollout restart deployment/server deployment/redis
 
   - name: make-user-admin
     deps:
@@ -254,10 +274,13 @@ scripts:
         echo "No input."
       else
         echo "User: $user"
-        query="update d_b_user set rolesOrPermissions = '[\"admin\"]' where name=\"$user\";"
+        query="update d_b_user set rolesOrPermissions = '[\"admin\", \"admin-permissions\"]', fgaRelationshipsVersion=0 where name=\"$user\";"
         mysql -e "$query" -u$DB_USERNAME -p$DB_PASSWORD -h 127.0.0.1 gitpod
       fi
       kill $PID || true
+
+      printf "\nRestarting server and redis to pick up DB changes...\n"
+      kubectl rollout restart deployment/server deployment/redis
 
   - name: add-smith-token
     deps:

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
 /**
  * Copyright (c) 2020 Gitpod GmbH. All rights reserved.
  * Licensed under the GNU Affero General Public License (AGPL).
@@ -5,17 +6,15 @@
  */
 
 import { injectable, inject, postConstruct } from "inversify";
-import * as express from "express";
-import * as passport from "passport";
-import * as OAuth2Strategy from "passport-oauth2";
+import express from "express";
+import passport from "passport";
+import OAuth2Strategy from "passport-oauth2";
 import { UserDB } from "@gitpod/gitpod-db/lib";
 import { AuthProviderInfo, Identity, Token, User } from "@gitpod/gitpod-protocol";
 import { log, LogContext } from "@gitpod/gitpod-protocol/lib/util/logging";
-import fetch from "node-fetch";
 import { oauth2tokenCallback, OAuth2 } from "oauth";
 import { URL } from "url";
-import { runInNewContext } from "vm";
-import { AuthFlow, AuthProvider } from "../auth/auth-provider";
+import { AuthProvider, AuthUser } from "../auth/auth-provider";
 import { AuthProviderParams, AuthUserSetup } from "../auth/auth-provider";
 import {
     AuthException,
@@ -26,12 +25,18 @@ import {
 import { Config } from "../config";
 import { getRequestingClientInfo } from "../express-util";
 import { TokenProvider } from "../user/token-provider";
-import { UserService } from "../user/user-service";
+import { UserAuthentication } from "../user/user-authentication";
 import { AuthProviderService } from "./auth-provider-service";
 import { LoginCompletionHandler } from "./login-completion-handler";
-import { TosFlow } from "../terms/tos-flow";
-import { increaseLoginCounter } from "../../src/prometheus-metrics";
 import { OutgoingHttpHeaders } from "http2";
+import { trackSignup } from "../analytics";
+import { daysBefore, isDateSmaller } from "@gitpod/gitpod-protocol/lib/util/timeutil";
+import { IAnalyticsWriter } from "@gitpod/gitpod-protocol/lib/analytics";
+import { VerificationService } from "../auth/verification-service";
+import { SignInJWT } from "./jwt";
+import { UserService } from "../user/user-service";
+import { reportLoginCompleted } from "../prometheus-metrics";
+import { TrustedValue } from "@gitpod/gitpod-protocol/lib/util/scrubbing";
 
 /**
  * This is a generic implementation of OAuth2-based AuthProvider.
@@ -61,18 +66,21 @@ import { OutgoingHttpHeaders } from "http2";
  *
  */
 @injectable()
-export class GenericAuthProvider implements AuthProvider {
+export abstract class GenericAuthProvider implements AuthProvider {
     @inject(AuthProviderParams) params: AuthProviderParams;
     @inject(TokenProvider) protected readonly tokenProvider: TokenProvider;
     @inject(UserDB) protected userDb: UserDB;
     @inject(Config) protected config: Config;
+    @inject(UserAuthentication) protected readonly userAuthentication: UserAuthentication;
     @inject(UserService) protected readonly userService: UserService;
     @inject(AuthProviderService) protected readonly authProviderService: AuthProviderService;
     @inject(LoginCompletionHandler) protected readonly loginCompletionHandler: LoginCompletionHandler;
+    @inject(IAnalyticsWriter) protected readonly analytics: IAnalyticsWriter;
+    @inject(VerificationService) protected readonly verificationService: VerificationService;
+    @inject(SignInJWT) protected readonly signInJWT: SignInJWT;
 
     @postConstruct()
     init() {
-        this.initAuthUserSetup();
         log.info(`(${this.strategyName}) Initialized.`, { sanitizedStrategyOptions: this.sanitizedStrategyOptions });
     }
 
@@ -88,25 +96,25 @@ export class GenericAuthProvider implements AuthProvider {
             icon,
             host,
             ownerId,
+            organizationId,
             verified,
             hiddenOnDashboard,
             disallowLogin,
             description,
-            loginContextMatcher,
         } = this.params;
         return {
             authProviderId: id,
             authProviderType: type,
             ownerId,
+            organizationId,
             verified,
             host,
             icon,
             hiddenOnDashboard,
-            loginContextMatcher,
             disallowLogin,
             description,
             scopes,
-            settingsUrl: this.oauthConfig.settingsUrl,
+            settingsUrl: this.oauthConfig.settingsUrl, // unused
             requirements: {
                 default: scopes,
                 publicRepo: scopes,
@@ -142,13 +150,21 @@ export class GenericAuthProvider implements AuthProvider {
         return scopes;
     }
 
-    protected readAuthUserSetup?: (accessToken: string, tokenResponse: object) => Promise<AuthUserSetup>;
+    protected abstract readAuthUserSetup(accessToken: string, tokenResponse: object): Promise<AuthUserSetup>;
 
-    authorize(req: express.Request, res: express.Response, next: express.NextFunction, scope?: string[]): void {
+    authorize(
+        req: express.Request,
+        res: express.Response,
+        next: express.NextFunction,
+        state: string,
+        scope?: string[],
+    ) {
         const handler = passport.authenticate(this.getStrategy() as any, {
             ...this.defaultStrategyOptions,
-            ...{ scope },
+            state,
+            scope,
         });
+
         handler(req, res, next);
     }
 
@@ -161,14 +177,15 @@ export class GenericAuthProvider implements AuthProvider {
         );
     }
 
-    async refreshToken(user: User) {
+    async refreshToken(user: User, requestedLifetimeDate: Date): Promise<Token> {
         log.info(`(${this.strategyName}) Token to be refreshed.`, { userId: user.id });
         const { authProviderId } = this;
         const identity = User.getIdentity(user, authProviderId);
         if (!identity) {
             throw new Error(`Cannot find an identity for ${authProviderId}`);
         }
-        const token = await this.userDb.findTokenForIdentity(identity);
+        const tokenEntry = await this.userDb.findTokenEntryForIdentity(identity);
+        const token = tokenEntry?.token;
         if (!token) {
             throw new Error(`Cannot find any current token for ${authProviderId}`);
         }
@@ -201,89 +218,34 @@ export class GenericAuthProvider implements AuthProvider {
             const expiryDate = tokenExpiresInSeconds
                 ? new Date(now.getTime() + tokenExpiresInSeconds * 1000).toISOString()
                 : undefined;
+            const reservedUntilDate = requestedLifetimeDate.toISOString();
             const newToken: Token = {
                 value: access_token,
                 username: this.tokenUsername,
                 scopes: token.scopes,
                 updateDate,
                 expiryDate,
+                reservedUntilDate,
                 refreshToken: refresh_token,
             };
-            await this.userDb.storeSingleToken(identity, newToken);
+            const newTokenEntry = await this.userDb.storeSingleToken(identity, newToken);
             log.info(`(${this.strategyName}) Token refreshed and updated.`, {
                 userId: user.id,
                 updateDate,
                 expiryDate,
+                reservedUntilDate,
             });
+            return newTokenEntry.token;
         } catch (error) {
-            log.error(`(${this.strategyName}) Failed to refresh token!`, { error });
+            log.error({ userId: user.id }, `(${this.strategyName}) Failed to refresh token!`, {
+                error: new TrustedValue(error),
+            });
             throw error;
         }
     }
 
-    protected initAuthUserSetup() {
-        if (this.readAuthUserSetup) {
-            // it's defined in subclass
-            return;
-        }
-        const { configFn, configURL } = this.oauthConfig;
-        if (configURL) {
-            this.readAuthUserSetup = async (accessToken: string, tokenResponse: object) => {
-                try {
-                    const fetchResult = await fetch(configURL, {
-                        timeout: 10000,
-                        method: "POST",
-                        headers: {
-                            Accept: "application/json",
-                            "Content-Type": "application/json",
-                        },
-                        body: JSON.stringify({
-                            accessToken,
-                            tokenResponse,
-                        }),
-                    });
-                    if (fetchResult.ok) {
-                        const jsonResult = await fetchResult.json();
-                        return jsonResult as AuthUserSetup;
-                    } else {
-                        throw new Error(fetchResult.statusText);
-                    }
-                } catch (error) {
-                    log.error(`(${this.strategyName}) Failed to fetch from "configURL"`, {
-                        error,
-                        configURL,
-                    });
-                    throw new Error("Error while reading user profile.");
-                }
-            };
-            return;
-        }
-        if (configFn) {
-            this.readAuthUserSetup = async (accessToken: string, tokenResponse: object) => {
-                let promise: Promise<AuthUserSetup>;
-                try {
-                    promise = runInNewContext(
-                        `tokenResponse = ${JSON.stringify(
-                            tokenResponse,
-                        )} || {}; (${configFn})("${accessToken}", tokenResponse)`,
-                        { fetch, console },
-                        { filename: `${this.strategyName}-fetchAuthUser`, timeout: 5000 },
-                    );
-                } catch (error) {
-                    log.error(`(${this.strategyName}) Failed to call "fetchAuthUserSetup"`, {
-                        error,
-                        configFn,
-                    });
-                    throw new Error("Error with the Auth Provider Configuration.");
-                }
-                try {
-                    return await promise;
-                } catch (error) {
-                    log.error(`(${this.strategyName}) Failed to run "configFn"`, { error, configFn });
-                    throw new Error("Error while reading user profile.");
-                }
-            };
-        }
+    public requiresOpportunisticRefresh() {
+        return this.params.type === "BitbucketServer";
     }
 
     protected cachedAuthCallbackPath: string | undefined = undefined;
@@ -321,7 +283,33 @@ export class GenericAuthProvider implements AuthProvider {
         });
 
         const isAlreadyLoggedIn = request.isAuthenticated() && User.is(request.user);
-        const authFlow = AuthFlow.get(request.session);
+
+        const state = request.query.state;
+        if (!state) {
+            log.error(cxt, `(${strategyName}) No state present on callback request.`, { clientInfo });
+            response.redirect(
+                this.getSorryUrl(`No state was present on the authentication callback. Please try again.`),
+            );
+            return;
+        }
+
+        const authFlow = request.authFlow;
+        if (!authFlow) {
+            log.error(`(${strategyName}) Auth flow state is missing.`);
+
+            reportLoginCompleted("failed", "git");
+            response.redirect(this.getSorryUrl(`Auth flow state is missing.`));
+            return;
+        }
+
+        if (!this.loginCompletionHandler.isBaseDomain(request)) {
+            // For auth requests that are not targetting the base domain, we redirect to the base domain, so they come with our cookie.
+            log.info(`(${strategyName}) Auth request on subdomain, redirecting to base domain`, { clientInfo });
+            const target = new URL(request.url, this.config.hostUrl.url.toString()).toString();
+            response.redirect(target);
+            return;
+        }
+
         if (isAlreadyLoggedIn) {
             if (!authFlow) {
                 log.warn(
@@ -337,7 +325,7 @@ export class GenericAuthProvider implements AuthProvider {
         // assert additional infomation is attached to current session
         if (!authFlow) {
             // The auth flow state info is missing in the session: count as client error
-            increaseLoginCounter("failed_client", this.host);
+            reportLoginCompleted("failed_client", "git");
 
             log.error(cxt, `(${strategyName}) No session found during auth callback.`, { clientInfo });
             response.redirect(this.getSorryUrl(`Please allow Cookies in your browser and try to log in again.`));
@@ -345,7 +333,7 @@ export class GenericAuthProvider implements AuthProvider {
         }
 
         if (authFlow.host !== this.host) {
-            increaseLoginCounter("failed", this.host);
+            reportLoginCompleted("failed", "git");
 
             log.error(cxt, `(${strategyName}) Host does not match.`, { clientInfo });
             response.redirect(this.getSorryUrl(`Host does not match.`));
@@ -361,11 +349,8 @@ export class GenericAuthProvider implements AuthProvider {
 
         if (callbackError) {
             // e.g. "access_denied"
-            // Clean up the session
-            await AuthFlow.clear(request.session);
-            await TosFlow.clear(request.session);
+            reportLoginCompleted("failed", "git");
 
-            increaseLoginCounter("failed", this.host);
             return this.sendCompletionRedirectWithError(response, {
                 error: callbackError,
                 description: callbackErrorDescription,
@@ -386,7 +371,11 @@ export class GenericAuthProvider implements AuthProvider {
             return;
         }
         const [err, userOrIdentity, flowContext] = result;
-
+        log.debug("Auth provider result", {
+            err,
+            userOrIdentity,
+            flowContext,
+        });
         /*
          * (3) this callback function is called after the "verify" function as the final step in the authentication process in passport.
          *
@@ -398,20 +387,16 @@ export class GenericAuthProvider implements AuthProvider {
          * incoming `/callback` request:
          *
          * - redirect to handle/display errors
-         * - redirect to terms acceptance request page
          * - call `request.login` on new sessions
          * - redirect to `returnTo` (from request parameter)
          */
 
         const context = LogContext.from({
-            user: User.is(userOrIdentity) ? { userId: userOrIdentity.id } : undefined,
+            userId: User.is(userOrIdentity) ? userOrIdentity.id : undefined,
             request,
         });
 
         if (err) {
-            await AuthFlow.clear(request.session);
-            await TosFlow.clear(request.session);
-
             if (SelectAccountException.is(err)) {
                 return this.sendCompletionRedirectWithError(response, err.payload);
             }
@@ -434,7 +419,7 @@ export class GenericAuthProvider implements AuthProvider {
                 return this.sendCompletionRedirectWithError(response, { error: err.message });
             }
 
-            increaseLoginCounter("failed", this.host);
+            reportLoginCompleted("failed", "git");
             log.error(context, `(${strategyName}) Redirect to /sorry from verify callback`, err, {
                 ...defaultLogPayload,
                 err,
@@ -443,39 +428,111 @@ export class GenericAuthProvider implements AuthProvider {
         }
 
         if (flowContext) {
-            if (
-                TosFlow.WithIdentity.is(flowContext) ||
-                (TosFlow.WithUser.is(flowContext) && flowContext.termsAcceptanceRequired)
-            ) {
-                // This is the regular path on sign up. We just went through the OAuth2 flow but didn't create a Gitpod
-                // account yet, as we require to accept the terms first.
-                log.info(context, `(${strategyName}) Redirect to /api/tos`, {
-                    info: flowContext,
-                    ...defaultLogPayload,
+            const logPayload = {
+                withIdentity: VerifyResult.WithIdentity.is(flowContext) ? flowContext.candidate : undefined,
+                withUser: VerifyResult.WithUser.is(flowContext) ? flowContext.user.id : undefined,
+                ...defaultLogPayload,
+            };
+
+            if (VerifyResult.WithIdentity.is(flowContext)) {
+                log.info(context, `(${strategyName}) Creating new user and completing login.`, logPayload);
+                // There is no current session, we need to create a new user because this
+                // identity does not yet exist.
+                const newUser = await this.createNewUser({
+                    request,
+                    candidate: flowContext.candidate,
+                    token: flowContext.token,
+                    authUser: flowContext.authUser,
+                    isBlocked: flowContext.isBlocked,
                 });
 
-                // attach the sign up info to the session, in order to proceed after acceptance of terms
-                await TosFlow.attach(request.session!, flowContext);
-
-                response.redirect(this.config.hostUrl.withApi({ pathname: "/tos", search: "mode=login" }).toString());
-                return;
-            } else {
-                const { user, elevateScopes } = flowContext as TosFlow.WithUser;
-                log.info(context, `(${strategyName}) Directly log in and proceed.`, {
-                    info: flowContext,
-                    ...defaultLogPayload,
+                // Set all cookies used on website for visitor preferences for .gitpod.io domain if no preference exists yet
+                ["gp-analytical", "gp-necessary", "gp-targeting"].forEach((cookieName) => {
+                    if (!request.cookies[cookieName]) {
+                        response.cookie(cookieName, "true", {
+                            maxAge: 365 * 24 * 60 * 60 * 1000, //set to a year
+                            domain: "." + request.header("Host"),
+                        });
+                    }
                 });
 
-                // Complete login
-                const { host, returnTo } = authFlow;
                 await this.loginCompletionHandler.complete(request, response, {
-                    user,
-                    returnToUrl: returnTo,
-                    authHost: host,
-                    elevateScopes,
+                    user: newUser,
+                    returnToUrl: authFlow.returnTo,
+                    authHost: authFlow.host,
                 });
+            } else {
+                const { user, elevateScopes } = flowContext as VerifyResult.WithUser;
+
+                if (request.user) {
+                    // Git authorization request, the User.identities entry is expected to be updated already.
+                    // We're marking this AP as verified and redirect to the provided URL.
+
+                    if (authFlow.host) {
+                        await this.loginCompletionHandler.updateAuthProviderAsVerified(authFlow.host, user);
+                    }
+
+                    log.info(
+                        context,
+                        `(${strategyName}) Authorization callback for an existing user. Auth provider ${authFlow.host} marked as verified.`,
+                        logPayload,
+                    );
+
+                    const { returnTo } = authFlow;
+                    response.redirect(returnTo);
+                    return;
+                } else {
+                    // Complete login into an existing account
+
+                    log.info(context, `(${strategyName}) Directly log in and proceed.`, logPayload);
+
+                    const { host, returnTo } = authFlow;
+                    await this.loginCompletionHandler.complete(request, response, {
+                        user,
+                        returnToUrl: returnTo,
+                        authHost: host,
+                        elevateScopes,
+                    });
+                }
             }
         }
+    }
+
+    protected async createNewUser(params: {
+        request: express.Request;
+        candidate: Identity;
+        token: Token;
+        authUser: AuthUser;
+        isBlocked?: boolean;
+    }) {
+        const { request, candidate, token, authUser, isBlocked } = params;
+        const user = await this.userService.createUser({
+            identity: candidate,
+            token,
+            userUpdate: (newUser) => {
+                newUser.name = authUser.authName;
+                newUser.fullName = authUser.name || undefined;
+                newUser.avatarUrl = authUser.avatarUrl;
+                newUser.blocked = newUser.blocked || isBlocked;
+                if (
+                    authUser.created_at &&
+                    isDateSmaller(authUser.created_at, daysBefore(new Date().toISOString(), 30))
+                ) {
+                    // people with an account older than 30 days are treated as trusted
+                    newUser.lastVerificationTime = new Date().toISOString();
+                }
+            },
+        });
+
+        if (user.blocked) {
+            log.warn({ user: user.id }, "user blocked on signup");
+        }
+
+        /** no await */ trackSignup(user, request, this.analytics).catch((err) =>
+            log.warn({ userId: user.id }, "trackSignup", err),
+        );
+
+        return user;
     }
 
     protected sendCompletionRedirectWithError(response: express.Response, error: object): void {
@@ -496,7 +553,6 @@ export class GenericAuthProvider implements AuthProvider {
      * - `access_token` is provided
      * - it's expected to fetch the user info (see `fetchAuthUserSetup`)
      * - it's expected to handle the state persisted in the database in order to find/create/update the user instance
-     * - it's expected to identify missing requirements, e.g. missing terms acceptance
      * - finally, it's expected to call `done` and provide the computed result in order to finalize the auth process
      */
     protected async verify(
@@ -509,20 +565,24 @@ export class GenericAuthProvider implements AuthProvider {
     ) {
         const done = _done as VerifyCallback;
         let flowContext: VerifyResult;
-        const { strategyName, params: config } = this;
+        const { strategyName } = this;
         const clientInfo = getRequestingClientInfo(req);
         const authProviderId = this.authProviderId;
-        const authFlow = AuthFlow.get(req.session)!; // asserted in `callback` allready
-        const defaultLogPayload = { authFlow, clientInfo, authProviderId };
         let currentGitpodUser: User | undefined = User.is(req.user) ? req.user : undefined;
         let candidate: Identity;
 
+        const authFlow = req.authFlow;
+        if (!authFlow) {
+            log.error(`(${strategyName}) Auth flow state is missing.`);
+            done(AuthException.create("authflow-missing", "Auth flow state is missing.", {}), undefined);
+            return;
+        }
+
+        const defaultLogPayload = { authFlow, clientInfo, authProviderId };
+
         try {
             const tokenResponseObject = this.ensureIsObject(tokenResponse);
-            const { authUser, currentScopes, envVars } = await this.fetchAuthUserSetup(
-                accessToken,
-                tokenResponseObject,
-            );
+            const { authUser, currentScopes, envVars } = await this.readAuthUserSetup(accessToken, tokenResponseObject);
             const { authName, primaryEmail } = authUser;
             candidate = { authProviderId, ...authUser };
 
@@ -540,7 +600,7 @@ export class GenericAuthProvider implements AuthProvider {
                         ...defaultLogPayload,
                         authUser,
                         candidate,
-                        currentGitpodUser: User.censor(currentGitpodUser),
+                        currentGitpodUser: currentGitpodUser.id,
                         clientInfo,
                     });
                     done(
@@ -556,7 +616,7 @@ export class GenericAuthProvider implements AuthProvider {
 
                 // we need to check current provider authorizations first...
                 try {
-                    await this.userService.asserNoTwinAccount(
+                    await this.userAuthentication.assertNoTwinAccount(
                         currentGitpodUser,
                         this.host,
                         this.authProviderId,
@@ -567,7 +627,7 @@ export class GenericAuthProvider implements AuthProvider {
                         ...defaultLogPayload,
                         authUser,
                         candidate,
-                        currentGitpodUser: User.censor(currentGitpodUser),
+                        currentGitpodUser: currentGitpodUser.id,
                         clientInfo,
                     });
                     done(error, undefined);
@@ -575,12 +635,12 @@ export class GenericAuthProvider implements AuthProvider {
                 }
             } else {
                 // no user session present, let's initiate a login
-                currentGitpodUser = await this.userService.findUserForLogin({ candidate });
+                currentGitpodUser = await this.userAuthentication.findUserForLogin({ candidate });
 
                 if (!currentGitpodUser) {
                     // signup new accounts with email adresses already taken is disallowed
                     try {
-                        await this.userService.asserNoAccountWithEmail(primaryEmail);
+                        await this.userAuthentication.asserNoAccountWithEmail(primaryEmail);
                     } catch (error) {
                         log.warn(`Login attempt with matching email address.`, {
                             ...defaultLogPayload,
@@ -603,48 +663,35 @@ export class GenericAuthProvider implements AuthProvider {
             );
 
             if (currentGitpodUser) {
-                const termsAcceptanceRequired = await this.userService.checkTermsAcceptanceRequired({
-                    config,
-                    identity: candidate,
-                    user: currentGitpodUser,
-                });
                 const elevateScopes = authFlow.overrideScopes
                     ? undefined
                     : await this.getMissingScopeForElevation(currentGitpodUser, currentScopes);
-                const isBlocked = await this.userService.isBlocked({ user: currentGitpodUser });
+                const isBlocked = await this.userAuthentication.isBlocked({ user: currentGitpodUser });
 
-                await this.userService.updateUserOnLogin(currentGitpodUser, authUser, candidate, token);
-                await this.userService.updateUserEnvVarsOnLogin(currentGitpodUser, envVars); // derived from AuthProvider
+                const user = await this.userAuthentication.updateUserOnLogin(
+                    currentGitpodUser,
+                    authUser,
+                    candidate,
+                    token,
+                );
+                currentGitpodUser = user;
 
-                flowContext = <TosFlow.WithUser>{
-                    user: User.censor(currentGitpodUser),
+                flowContext = <VerifyResult.WithUser>{
+                    user: user,
                     isBlocked,
-                    termsAcceptanceRequired,
                     returnToUrl: authFlow.returnTo,
                     authHost: this.host,
                     elevateScopes,
                 };
             } else {
-                const termsAcceptanceRequired = await this.userService.checkTermsAcceptanceRequired({
-                    config,
-                    identity: candidate,
-                });
-
-                // `checkSignUp` might throgh `AuthError`s with the intention to block the signup process.
-                await this.userService.checkSignUp({ config, identity: candidate });
-
-                const isBlocked = await this.userService.isBlocked({ primaryEmail });
-                const { githubIdentity, githubToken } = this.createGhProxyIdentity(candidate);
-                flowContext = <TosFlow.WithIdentity>{
+                const isBlocked = await this.userAuthentication.isBlocked({ primaryEmail });
+                flowContext = <VerifyResult.WithIdentity>{
                     candidate,
                     token,
                     authUser,
                     envVars,
-                    additionalIdentity: githubIdentity,
-                    additionalToken: githubToken,
                     authHost: this.host,
                     isBlocked,
-                    termsAcceptanceRequired,
                 };
             }
             done(undefined, currentGitpodUser || candidate, flowContext);
@@ -696,13 +743,6 @@ export class GenericAuthProvider implements AuthProvider {
         return "oauth2";
     }
 
-    protected async fetchAuthUserSetup(accessToken: string, tokenResponse: object): Promise<AuthUserSetup> {
-        if (!this.readAuthUserSetup) {
-            throw new Error(`(${this.strategyName}) is missing configuration for reading of user information.`);
-        }
-        return this.readAuthUserSetup(accessToken, tokenResponse);
-    }
-
     protected ensureIsObject(value: any): object {
         if (typeof value === "object") {
             return value;
@@ -725,30 +765,6 @@ export class GenericAuthProvider implements AuthProvider {
         return set.size > 0;
     }
 
-    protected createGhProxyIdentity(originalIdentity: Identity) {
-        const githubTokenValue = this.params.params && this.params.params.githubToken;
-        if (!githubTokenValue) {
-            return {};
-        }
-        const publicGitHubAuthProviderId = "Public-GitHub";
-
-        const githubIdentity: Identity = {
-            authProviderId: publicGitHubAuthProviderId,
-            authId: `proxy-${originalIdentity.authId}`,
-            authName: `proxy-${originalIdentity.authName}`,
-            primaryEmail: originalIdentity.primaryEmail,
-            readonly: false, // THIS ENABLES US TO UPGRADE FROM PROXY TO REAL GITHUB ACCOUNT
-        };
-        // this proxy identity should allow instant read access for GitHub API
-        const githubToken: Token = {
-            value: githubTokenValue,
-            username: "oauth2",
-            scopes: ["user:email"],
-            updateDate: new Date().toISOString(),
-        };
-        return { githubIdentity, githubToken };
-    }
-
     protected isOAuthError(err: any): boolean {
         if (typeof err === "object" && (err.name == "InternalOAuthError" || err.name === "AuthorizationError")) {
             return true;
@@ -757,7 +773,7 @@ export class GenericAuthProvider implements AuthProvider {
     }
 
     protected get sanitizedStrategyOptions(): Omit<StrategyOptionsWithRequest, "clientSecret"> {
-        const { clientSecret, ...sanitizedOptions } = this.defaultStrategyOptions;
+        const { ...sanitizedOptions } = this.defaultStrategyOptions;
         return sanitizedOptions;
     }
 
@@ -772,9 +788,6 @@ export class GenericAuthProvider implements AuthProvider {
             scopeSeparator,
             authorizationParams,
         } = this.oauthConfig;
-        const augmentedAuthParams = this.config.devBranch
-            ? { ...authorizationParams, state: this.config.devBranch }
-            : authorizationParams;
         return {
             authorizationURL: authorizationUrl,
             tokenURL: tokenUrl,
@@ -786,7 +799,7 @@ export class GenericAuthProvider implements AuthProvider {
             scopeSeparator: scopeSeparator || " ",
             userAgent: this.USER_AGENT,
             passReqToCallback: true,
-            authorizationParams: augmentedAuthParams,
+            authorizationParams: authorizationParams,
         };
     }
 
@@ -808,7 +821,35 @@ export class GenericAuthProvider implements AuthProvider {
     };
 }
 
-export type VerifyResult = TosFlow.WithIdentity | TosFlow.WithUser;
+interface VerifyResult {
+    isBlocked?: boolean;
+    authHost?: string;
+}
+namespace VerifyResult {
+    export function is(data?: any): data is VerifyResult {
+        return WithUser.is(data) || WithIdentity.is(data);
+    }
+    export interface WithIdentity extends VerifyResult {
+        candidate: Identity;
+        authUser: AuthUser;
+        token: Token;
+    }
+    export namespace WithIdentity {
+        export function is(data?: any): data is WithIdentity {
+            return typeof data === "object" && "candidate" in data && "authUser" in data;
+        }
+    }
+    export interface WithUser extends VerifyResult {
+        user: User;
+        elevateScopes?: string[] | undefined;
+        returnToUrl?: string;
+    }
+    export namespace WithUser {
+        export function is(data?: VerifyResult): data is WithUser {
+            return typeof data === "object" && "user" in data;
+        }
+    }
+}
 
 interface GenericOAuthStrategyOptions {
     scope?: string | string[];

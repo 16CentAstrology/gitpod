@@ -5,17 +5,21 @@
  */
 
 import { createClientCallMetricsInterceptor, IClientCallMetrics } from "@gitpod/gitpod-protocol/lib/util/grpc";
-import { Disposable, Workspace, WorkspaceInstance } from "@gitpod/gitpod-protocol";
+import { Disposable, User, Workspace, WorkspaceInstance } from "@gitpod/gitpod-protocol";
 import { defaultGRPCOptions } from "@gitpod/gitpod-protocol/lib/util/grpc";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
-import { WorkspaceClusterWoTLS, WorkspaceManagerConnectionInfo } from "@gitpod/gitpod-protocol/lib/workspace-cluster";
+import {
+    WorkspaceClusterWoTLS,
+    WorkspaceManagerConnectionInfo,
+    WorkspaceRegion,
+} from "@gitpod/gitpod-protocol/lib/workspace-cluster";
 import * as grpc from "@grpc/grpc-js";
 import { inject, injectable, optional } from "inversify";
 import {
     WorkspaceManagerClientProviderCompositeSource,
     WorkspaceManagerClientProviderSource,
 } from "./client-provider-source";
-import { ExtendedUser, workspaceClusterSetsAuthorized } from "./constraints";
+import { workspaceClusterSetsAuthorized, workspaceClusterSetsAuthorizedAndSupportsWorkspaceClass } from "./constraints";
 import { WorkspaceManagerClient } from "./core_grpc_pb";
 import { linearBackoffStrategy, PromisifiedWorkspaceManagerClient } from "./promisified-client";
 
@@ -43,24 +47,31 @@ export class WorkspaceManagerClientProvider implements Disposable {
      * @param user user who wants to starts a workspace manager
      * @param workspace the workspace we want to start
      * @param instance the instance we want to start
+     * @param region the region we want to start the workspace in
+     * @param constrainWorkspaceClassSupport if true, only clusters that support the workspace class of the workspace are returned
      * @returns a set of workspace clusters we can start the workspace in
      */
     public async getStartClusterSets(
-        applicationCluster: string,
-        user: ExtendedUser,
-        workspace: Workspace,
-        instance: WorkspaceInstance,
+        user: User,
+        workspace?: Workspace,
+        instance?: WorkspaceInstance,
+        region?: WorkspaceRegion,
+        constrainWorkspaceClassSupport?: boolean,
     ): Promise<IWorkspaceClusterStartSet> {
-        const allClusters = await this.source.getAllWorkspaceClusters(applicationCluster);
+        const allClusters = await this.source.getAllWorkspaceClusters();
         const availableClusters = allClusters.filter((c) => c.score > 0 && c.state === "available");
 
-        const sets = workspaceClusterSetsAuthorized
+        let baseSets = workspaceClusterSetsAuthorized;
+        if (constrainWorkspaceClassSupport) {
+            baseSets = workspaceClusterSetsAuthorizedAndSupportsWorkspaceClass;
+        }
+        const sets = baseSets
             .map((constraints) => {
-                const r = constraints.constraint(availableClusters, user, workspace, instance);
+                const r = constraints.constraint(availableClusters, { user, workspace, instance, region });
                 if (!r) {
                     return;
                 }
-                return new ClusterSet(this, r, applicationCluster);
+                return new ClusterSet(this, r);
             })
             .filter((s) => s !== undefined) as ClusterSet[];
 
@@ -91,13 +102,9 @@ export class WorkspaceManagerClientProvider implements Disposable {
      * @param name
      * @returns The WorkspaceManagerClient identified by the name. Throws an error if there is none.
      */
-    public async get(
-        name: string,
-        applicationCluster: string,
-        grpcOptions?: object,
-    ): Promise<PromisifiedWorkspaceManagerClient> {
+    public async get(name: string, grpcOptions?: object): Promise<PromisifiedWorkspaceManagerClient> {
         const getConnectionInfo = async () => {
-            const cluster = await this.source.getWorkspaceCluster(name, applicationCluster);
+            const cluster = await this.source.getWorkspaceCluster(name);
             if (!cluster) {
                 throw new Error(`Unknown workspace manager \"${name}\"`);
             }
@@ -135,8 +142,8 @@ export class WorkspaceManagerClientProvider implements Disposable {
     /**
      * @returns All WorkspaceClusters (without TLS config)
      */
-    public async getAllWorkspaceClusters(applicationCluster: string): Promise<WorkspaceClusterWoTLS[]> {
-        return this.source.getAllWorkspaceClusters(applicationCluster);
+    public async getAllWorkspaceClusters(): Promise<WorkspaceClusterWoTLS[]> {
+        return this.source.getAllWorkspaceClusters();
     }
 
     public createConnection<T extends grpc.Client>(
@@ -183,7 +190,6 @@ class ClusterSet implements AsyncIterator<ClusterClientEntry> {
     constructor(
         protected readonly provider: WorkspaceManagerClientProvider,
         protected readonly cluster: WorkspaceClusterWoTLS[],
-        protected readonly applicationCluster: string,
     ) {}
 
     public async next(): Promise<IteratorResult<ClusterClientEntry>> {
@@ -198,7 +204,7 @@ class ClusterSet implements AsyncIterator<ClusterClientEntry> {
         const grpcOptions: grpc.ClientOptions = {
             ...defaultGRPCOptions,
         };
-        const client = await this.provider.get(chosenCluster.name, this.applicationCluster, grpcOptions);
+        const client = await this.provider.get(chosenCluster.name, grpcOptions);
         return {
             done: false,
             value: {

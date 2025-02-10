@@ -5,6 +5,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -14,10 +15,17 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/gitpod-io/gitpod/ws-manager/api"
+	"github.com/gitpod-io/gitpod/ws-proxy/pkg/common"
+)
+
+var (
+	ErrTokenNotFound = fmt.Errorf("no owner cookie present")
+	ErrTokenMismatch = fmt.Errorf("owner token mismatch")
+	ErrTokenDecode   = fmt.Errorf("cannot decode owner token")
 )
 
 // WorkspaceAuthHandler rejects requests which are not authenticated or authorized to access a workspace.
-func WorkspaceAuthHandler(domain string, info WorkspaceInfoProvider) mux.MiddlewareFunc {
+func WorkspaceAuthHandler(domain string, info common.WorkspaceInfoProvider) mux.MiddlewareFunc {
 	return func(h http.Handler) http.Handler {
 		cookiePrefix := domain
 		for _, c := range []string{" ", "-", "."} {
@@ -29,8 +37,8 @@ func WorkspaceAuthHandler(domain string, info WorkspaceInfoProvider) mux.Middlew
 			var (
 				log  = getLog(req.Context())
 				vars = mux.Vars(req)
-				wsID = vars[workspaceIDIdentifier]
-				port = vars[workspacePortIdentifier]
+				wsID = vars[common.WorkspaceIDIdentifier]
+				port = vars[common.WorkspacePortIdentifier]
 			)
 			if wsID == "" {
 				log.Warn("workspace request without workspace ID")
@@ -41,25 +49,15 @@ func WorkspaceAuthHandler(domain string, info WorkspaceInfoProvider) mux.Middlew
 
 			ws := info.WorkspaceInfo(wsID)
 			if ws == nil {
-				log.WithField("workspaceId", wsID).Warn("did not find workspace info")
 				resp.WriteHeader(http.StatusNotFound)
 
 				return
 			}
 
+			isPublic := false
 			if ws.Auth != nil && ws.Auth.Admission == api.AdmissionLevel_ADMIT_EVERYONE {
-				// workspace is free for all - no tokens or cookies matter
-				h.ServeHTTP(resp, req)
-
-				return
-			}
-
-			if port != "" {
-				// this is a workspace port request and ports can be public or private.
-				// For public ports no tokens or cookies matter, private ports are subject
-				// to the same access policies as the workspace itself is.
-				var isPublic bool
-
+				isPublic = true
+			} else if port != "" {
 				prt, err := strconv.ParseUint(port, 10, 16)
 				if err != nil {
 					log.WithField("port", port).WithError(err).Error("cannot convert port to int")
@@ -67,48 +65,65 @@ func WorkspaceAuthHandler(domain string, info WorkspaceInfoProvider) mux.Middlew
 					for _, p := range ws.Ports {
 						if p.Port == uint32(prt) {
 							isPublic = p.Visibility == api.PortVisibility_PORT_VISIBILITY_PUBLIC
-
 							break
 						}
 					}
 				}
-
-				if isPublic {
-					// workspace port is free for all - no tokens or cookies matter
-					h.ServeHTTP(resp, req)
-
-					return
-				}
-
-				// port seems to be private - subject it to the same access policy as the workspace itself
 			}
 
-			tkn := req.Header.Get("x-gitpod-owner-token")
-			if tkn == "" {
-				cn := fmt.Sprintf("%s%s_owner_", cookiePrefix, ws.InstanceID)
-				c, err := req.Cookie(cn)
+			authenticate := func() (bool, error) {
+				tkn := req.Header.Get("x-gitpod-owner-token")
+				if tkn == "" {
+					cn := fmt.Sprintf("%s%s_owner_", cookiePrefix, ws.InstanceID)
+					c, err := req.Cookie(cn)
+					if err != nil {
+						return false, ErrTokenNotFound
+					}
+					tkn = c.Value
+				}
+				tkn, err := url.QueryUnescape(tkn)
 				if err != nil {
-					log.WithField("cookieName", cn).Debug("no owner cookie present")
-					resp.WriteHeader(http.StatusUnauthorized)
-
-					return
+					return false, ErrTokenDecode
 				}
 
-				tkn = c.Value
+				if tkn != ws.Auth.OwnerToken {
+					return false, ErrTokenMismatch
+				}
+				return true, nil
 			}
-			tkn, err := url.QueryUnescape(tkn)
-			if err != nil {
-				log.WithError(err).Warn("cannot decode owner token")
-				resp.WriteHeader(http.StatusBadRequest)
 
+			authenticated, err := authenticate()
+			if !authenticated && !isPublic {
+				if err != nil {
+					if errors.Is(err, ErrTokenNotFound) {
+						resp.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					if errors.Is(err, ErrTokenMismatch) {
+						log.Warn("owner token mismatch")
+						resp.WriteHeader(http.StatusForbidden)
+						return
+					}
+					if errors.Is(err, ErrTokenDecode) {
+						log.Warn("cannot decode owner token")
+						resp.WriteHeader(http.StatusBadRequest)
+						return
+					}
+				}
+				log.WithError(err).Error("cannot authenticate")
+				resp.WriteHeader(http.StatusInternalServerError)
 				return
 			}
 
-			if tkn != ws.Auth.OwnerToken {
-				log.Warn("owner token mismatch")
-				resp.WriteHeader(http.StatusForbidden)
-
-				return
+			if !authenticated && isPublic {
+				ctx, id, err := info.AcquireContext(req.Context(), wsID, port)
+				if err != nil {
+					log.WithError(err).Error("cannot acquire context")
+					resp.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				defer info.ReleaseContext(id)
+				req = req.WithContext(ctx)
 			}
 
 			h.ServeHTTP(resp, req)

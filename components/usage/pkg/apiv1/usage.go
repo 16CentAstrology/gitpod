@@ -18,6 +18,7 @@ import (
 	v1 "github.com/gitpod-io/gitpod/usage-api/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"gorm.io/gorm"
 )
@@ -29,6 +30,7 @@ type UsageService struct {
 	nowFunc           func() time.Time
 	pricer            *WorkspacePricer
 	costCenterManager *db.CostCenterManager
+	ledgerInterval    time.Duration
 
 	v1.UnimplementedUsageServiceServer
 }
@@ -57,6 +59,10 @@ func (s *UsageService) ListUsage(ctx context.Context, in *v1.ListUsageRequest) (
 		return nil, status.Errorf(codes.InvalidArgument, "Number of items perPage needs to be positive (was %d).", in.GetPagination().GetPerPage())
 	}
 
+	if in.GetPagination().GetPerPage() > 1000 {
+		return nil, status.Errorf(codes.InvalidArgument, "Number of items perPage needs to be no more than 1000 (was %d).", in.GetPagination().GetPerPage())
+	}
+
 	if in.GetPagination().GetPage() < 0 {
 		return nil, status.Errorf(codes.InvalidArgument, "Page number needs to be 0 or greater (was %d).", in.GetPagination().GetPage())
 	}
@@ -81,9 +87,18 @@ func (s *UsageService) ListUsage(ctx context.Context, in *v1.ListUsageRequest) (
 	}
 	var offset = perPage * (page - 1)
 
+	var userID uuid.UUID
+	if in.UserId != "" {
+		userID, err = uuid.Parse(in.UserId)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "UserID '%s' couldn't be parsed (error: %s).", in.UserId, err)
+		}
+	}
+
 	excludeDrafts := false
 	listUsageResult, err := db.FindUsage(ctx, s.conn, &db.FindUsageParams{
 		AttributionId: db.AttributionID(in.GetAttributionId()),
+		UserID:        userID,
 		From:          from,
 		To:            to,
 		Order:         order,
@@ -93,11 +108,12 @@ func (s *UsageService) ListUsage(ctx context.Context, in *v1.ListUsageRequest) (
 	})
 	logger := log.Log.
 		WithField("attribution_id", in.AttributionId).
+		WithField("userID", userID).
 		WithField("perPage", perPage).
 		WithField("page", page).
 		WithField("from", from).
 		WithField("to", to)
-	logger.Info("Fetching usage data")
+	logger.Debug("Fetching usage data")
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch usage.")
 		return nil, status.Error(codes.Internal, "unable to retrieve usage")
@@ -132,6 +148,7 @@ func (s *UsageService) ListUsage(ctx context.Context, in *v1.ListUsageRequest) (
 	usageSummary, err := db.GetUsageSummary(ctx, s.conn,
 		db.GetUsageSummaryParams{
 			AttributionId: attributionId,
+			UserID:        userID,
 			From:          from,
 			To:            to,
 			ExcludeDrafts: excludeDrafts,
@@ -152,9 +169,10 @@ func (s *UsageService) ListUsage(ctx context.Context, in *v1.ListUsageRequest) (
 	}
 
 	return &v1.ListUsageResponse{
-		UsageEntries: usageData,
-		CreditsUsed:  usageSummary.CreditCentsUsed.ToCredits(),
-		Pagination:   &pagination,
+		UsageEntries:   usageData,
+		CreditsUsed:    usageSummary.CreditCentsUsed.ToCredits(),
+		Pagination:     &pagination,
+		LedgerInterval: durationpb.New(s.ledgerInterval),
 	}, nil
 }
 
@@ -340,13 +358,13 @@ func reconcileUsage(instances []db.WorkspaceInstanceForUsage, drafts []db.Usage,
 
 	instancesByID := dedupeWorkspaceInstancesForUsage(instances)
 
-	draftsByWorkspaceID := map[uuid.UUID]db.Usage{}
+	draftsByInstanceID := map[uuid.UUID]db.Usage{}
 	for _, draft := range drafts {
-		draftsByWorkspaceID[*draft.WorkspaceInstanceID] = draft
+		draftsByInstanceID[*draft.WorkspaceInstanceID] = draft
 	}
 
 	for instanceID, instance := range instancesByID {
-		if usage, exists := draftsByWorkspaceID[instanceID]; exists {
+		if usage, exists := draftsByInstanceID[instanceID]; exists {
 			updatedUsage, err := updateUsageFromInstance(instance, usage, pricer, now)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to construct updated usage record: %w", err)
@@ -374,7 +392,7 @@ func newUsageFromInstance(instance db.WorkspaceInstanceForUsage, pricer *Workspa
 	}
 
 	draft := true
-	if stopTime.IsSet() {
+	if instance.StoppedTime.IsSet() {
 		draft = false
 	}
 
@@ -394,21 +412,31 @@ func newUsageFromInstance(instance db.WorkspaceInstanceForUsage, pricer *Workspa
 		Draft:               draft,
 	}
 
+	creationTime := ""
+	if instance.CreationTime.IsSet() {
+		creationTime = db.TimeToISO8601(instance.CreationTime.Time())
+	}
 	startedTime := ""
 	if instance.StartedTime.IsSet() {
 		startedTime = db.TimeToISO8601(instance.StartedTime.Time())
 	}
 	endTime := ""
-	if instance.StoppingTime.IsSet() {
-		endTime = db.TimeToISO8601(instance.StoppingTime.Time())
+	if stopTime.IsSet() {
+		endTime = db.TimeToISO8601(stopTime.Time())
+	}
+	stoppedTime := ""
+	if instance.StoppedTime.IsSet() {
+		stoppedTime = db.TimeToISO8601(instance.StoppedTime.Time())
 	}
 	err := usage.SetMetadataWithWorkspaceInstance(db.WorkspaceInstanceUsageData{
 		WorkspaceId:    instance.WorkspaceID,
 		WorkspaceType:  instance.Type,
 		WorkspaceClass: instance.WorkspaceClass,
 		ContextURL:     instance.ContextURL,
+		CreationTime:   creationTime,
 		StartTime:      startedTime,
 		EndTime:        endTime,
+		StoppedTime:    stoppedTime,
 		UserID:         instance.UserID,
 		UserName:       instance.UserName,
 		UserAvatarURL:  instance.UserAvatarURL,
@@ -448,15 +476,22 @@ func dedupeWorkspaceInstancesForUsage(instances []db.WorkspaceInstanceForUsage) 
 	return set
 }
 
-func NewUsageService(conn *gorm.DB, pricer *WorkspacePricer, costCenterManager *db.CostCenterManager) *UsageService {
+func NewUsageService(conn *gorm.DB, pricer *WorkspacePricer, costCenterManager *db.CostCenterManager, ledgerIntervalStr string) (*UsageService, error) {
+
+	ledgerInterval, err := time.ParseDuration(ledgerIntervalStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse schedule duration: %w", err)
+	}
+
 	return &UsageService{
 		conn:              conn,
 		costCenterManager: costCenterManager,
 		nowFunc: func() time.Time {
 			return time.Now().UTC()
 		},
-		pricer: pricer,
-	}
+		pricer:         pricer,
+		ledgerInterval: ledgerInterval,
+	}, nil
 }
 
 func (s *UsageService) AddUsageCreditNote(ctx context.Context, req *v1.AddUsageCreditNoteRequest) (*v1.AddUsageCreditNoteResponse, error) {
@@ -477,11 +512,6 @@ func (s *UsageService) AddUsageCreditNote(ctx context.Context, req *v1.AddUsageC
 		return nil, status.Error(codes.InvalidArgument, "The description must not be empty.")
 	}
 
-	userId, err := uuid.Parse(req.UserId)
-	if err != nil {
-		return nil, fmt.Errorf("The user id is not a valid UUID. %w", err)
-	}
-
 	usage := db.Usage{
 		ID:            uuid.New(),
 		AttributionID: attributionId,
@@ -492,9 +522,15 @@ func (s *UsageService) AddUsageCreditNote(ctx context.Context, req *v1.AddUsageC
 		Draft:         false,
 	}
 
-	err = usage.SetCreditNoteMetaData(db.CreditNoteMetaData{UserId: userId.String()})
-	if err != nil {
-		return nil, err
+	if req.UserId != "" {
+		userId, err := uuid.Parse(req.UserId)
+		if err != nil {
+			return nil, fmt.Errorf("The user id is not a valid UUID. %w", err)
+		}
+		err = usage.SetCreditNoteMetaData(db.CreditNoteMetaData{UserID: userId.String()})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	err = db.InsertUsage(ctx, s.conn, usage)

@@ -5,9 +5,11 @@
 package supervisor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"golang.org/x/xerrors"
 	"google.golang.org/grpc"
@@ -24,8 +27,10 @@ import (
 
 	"github.com/gitpod-io/gitpod/common-go/log"
 	csapi "github.com/gitpod-io/gitpod/content-service/api"
+	"github.com/gitpod-io/gitpod/content-service/pkg/logs"
 	"github.com/gitpod-io/gitpod/supervisor/api"
 	"github.com/gitpod-io/gitpod/supervisor/pkg/ports"
+	"github.com/gitpod-io/gitpod/supervisor/pkg/serverapi"
 )
 
 // RegisterableService can register a service.
@@ -40,7 +45,7 @@ type RegisterableGRPCService interface {
 // RegisterableRESTService can register REST services.
 type RegisterableRESTService interface {
 	// RegisterREST registers a REST service
-	RegisterREST(mux *runtime.ServeMux, grpcEndpoint string) error
+	RegisterREST(ctx context.Context, mux *runtime.ServeMux, grpcEndpoint string) error
 }
 
 type DesktopIDEStatus struct {
@@ -51,9 +56,14 @@ type DesktopIDEStatus struct {
 }
 
 type ideReadyState struct {
-	ready bool
-	info  *DesktopIDEStatus
-	cond  *sync.Cond
+	ready     bool
+	ideConfig *IDEConfig
+	info      *DesktopIDEStatus
+	cond      *sync.Cond
+}
+
+func newIDEReadyState(ideConfig *IDEConfig) *ideReadyState {
+	return &ideReadyState{cond: sync.NewCond(&sync.Mutex{}), ideConfig: ideConfig}
 }
 
 // Wait returns a channel that emits when IDE is ready.
@@ -92,6 +102,7 @@ func (service *ideReadyState) Set(ready bool, info *DesktopIDEStatus) {
 }
 
 type statusService struct {
+	willShutdownCtx context.Context
 	ContentState    ContentState
 	Ports           *ports.Manager
 	Tasks           *tasksManager
@@ -106,11 +117,25 @@ func (s *statusService) RegisterGRPC(srv *grpc.Server) {
 	api.RegisterStatusServiceServer(srv, s)
 }
 
-func (s *statusService) RegisterREST(mux *runtime.ServeMux, grpcEndpoint string) error {
-	return api.RegisterStatusServiceHandlerFromEndpoint(context.Background(), mux, grpcEndpoint, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
+func (s *statusService) RegisterREST(ctx context.Context, mux *runtime.ServeMux, grpcEndpoint string) error {
+	return api.RegisterStatusServiceHandlerFromEndpoint(ctx, mux, grpcEndpoint, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
 }
 
-func (s *statusService) SupervisorStatus(context.Context, *api.SupervisorStatusRequest) (*api.SupervisorStatusResponse, error) {
+func (s *statusService) SupervisorStatus(ctx context.Context, req *api.SupervisorStatusRequest) (*api.SupervisorStatusResponse, error) {
+	if req.WillShutdown {
+		if s.willShutdownCtx.Err() != nil {
+			return &api.SupervisorStatusResponse{Ok: true}, nil
+		}
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return nil, status.Error(codes.Canceled, "execution canceled")
+			}
+			return nil, status.Error(codes.DeadlineExceeded, ctx.Err().Error())
+		case <-s.willShutdownCtx.Done():
+			return &api.SupervisorStatusResponse{Ok: true}, nil
+		}
+	}
 	return &api.SupervisorStatusResponse{Ok: true}, nil
 }
 
@@ -212,6 +237,7 @@ func (s *statusService) PortsStatus(req *api.PortsStatusRequest, srv api.StatusS
 
 	sub, err := s.Ports.Subscribe()
 	if err == ports.ErrTooManySubscriptions {
+		log.WithError(err).Warn("potentially leaking subscription to port status")
 		return status.Error(codes.ResourceExhausted, "too many subscriptions")
 	}
 	if err != nil {
@@ -252,6 +278,7 @@ func (s *statusService) TasksStatus(req *api.TasksStatusRequest, srv api.StatusS
 
 	sub := s.Tasks.Subscribe()
 	if sub == nil {
+		log.Warn("potentially leaking subscription to tasks status: too many subscriptions")
 		return status.Error(codes.ResourceExhausted, "too many subscriptions")
 	}
 	defer sub.Close()
@@ -285,8 +312,8 @@ func (s RegistrableTokenService) RegisterGRPC(srv *grpc.Server) {
 }
 
 // RegisterREST registers a REST service.
-func (s RegistrableTokenService) RegisterREST(mux *runtime.ServeMux, grpcEndpoint string) error {
-	return api.RegisterTokenServiceHandlerFromEndpoint(context.Background(), mux, grpcEndpoint, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
+func (s RegistrableTokenService) RegisterREST(ctx context.Context, mux *runtime.ServeMux, grpcEndpoint string) error {
+	return api.RegisterTokenServiceHandlerFromEndpoint(ctx, mux, grpcEndpoint, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
 }
 
 // NewInMemoryTokenService produces a new InMemoryTokenService.
@@ -623,10 +650,15 @@ func (rt *remoteTokenProvider) GetToken(ctx context.Context, req *api.GetTokenRe
 
 // InfoService implements the api.InfoService.
 type InfoService struct {
-	cfg          *Config
-	ContentState ContentState
+	cfg           *Config
+	ContentState  ContentState
+	GitpodService serverapi.APIInterface
 
 	api.UnimplementedInfoServiceServer
+}
+
+func NewInfoService(cfg *Config, cstate ContentState, gitpodService serverapi.APIInterface) *InfoService {
+	return &InfoService{cfg: cfg, ContentState: cstate, GitpodService: gitpodService}
 }
 
 // RegisterGRPC registers the gRPC info service.
@@ -635,12 +667,13 @@ func (is *InfoService) RegisterGRPC(srv *grpc.Server) {
 }
 
 // RegisterREST registers the REST info service.
-func (is *InfoService) RegisterREST(mux *runtime.ServeMux, grpcEndpoint string) error {
-	return api.RegisterInfoServiceHandlerFromEndpoint(context.Background(), mux, grpcEndpoint, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
+func (is *InfoService) RegisterREST(ctx context.Context, mux *runtime.ServeMux, grpcEndpoint string) error {
+	return api.RegisterInfoServiceHandlerFromEndpoint(ctx, mux, grpcEndpoint, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
 }
 
 // WorkspaceInfo provides information about the workspace.
-func (is *InfoService) WorkspaceInfo(context.Context, *api.WorkspaceInfoRequest) (*api.WorkspaceInfoResponse, error) {
+// Note: we will use this performance critical function everywhere for initial opening please consider its performance when add new features
+func (is *InfoService) WorkspaceInfo(ctx context.Context, req *api.WorkspaceInfoRequest) (*api.WorkspaceInfoResponse, error) {
 	resp := &api.WorkspaceInfoResponse{
 		CheckoutLocation:     is.cfg.RepoRoot,
 		InstanceId:           is.cfg.WorkspaceInstanceID,
@@ -652,6 +685,9 @@ func (is *InfoService) WorkspaceInfo(context.Context, *api.WorkspaceInfoRequest)
 		IdeAlias:             is.cfg.IDEAlias,
 		IdePort:              uint32(is.cfg.IDEPort),
 		WorkspaceClass:       &api.WorkspaceInfoResponse_WorkspaceClass{Id: is.cfg.WorkspaceClass},
+		OwnerId:              is.cfg.OwnerId,
+		DebugWorkspaceType:   is.cfg.DebugWorkspaceType,
+		ConfigcatEnabled:     is.cfg.ConfigcatEnabled,
 	}
 	if is.cfg.WorkspaceClassInfo != nil {
 		resp.WorkspaceClass.DisplayName = is.cfg.WorkspaceClassInfo.DisplayName
@@ -696,10 +732,12 @@ func (is *InfoService) WorkspaceInfo(context.Context, *api.WorkspaceInfoRequest)
 
 // ControlService implements the supervisor control service.
 type ControlService struct {
-	portsManager *ports.Manager
+	portsManager  *ports.Manager
+	gitpodService serverapi.APIInterface
 
 	privateKey string
 	publicKey  string
+	hostKey    *api.SSHPublicKey
 
 	api.UnimplementedControlServiceServer
 }
@@ -709,6 +747,11 @@ func (c *ControlService) RegisterGRPC(srv *grpc.Server) {
 	api.RegisterControlServiceServer(srv, c)
 }
 
+// RegisterREST registers the REST info service.
+func (is *ControlService) RegisterREST(ctx context.Context, mux *runtime.ServeMux, grpcEndpoint string) error {
+	return api.RegisterControlServiceHandlerFromEndpoint(ctx, mux, grpcEndpoint, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
+}
+
 // ExposePort exposes a port.
 func (c *ControlService) ExposePort(ctx context.Context, req *api.ExposePortRequest) (*api.ExposePortResponse, error) {
 	err := c.portsManager.Expose(ctx, req.Port)
@@ -716,8 +759,9 @@ func (c *ControlService) ExposePort(ctx context.Context, req *api.ExposePortRequ
 }
 
 // CreateSSHKeyPair create a ssh key pair for the workspace.
-func (ss *ControlService) CreateSSHKeyPair(context.Context, *api.CreateSSHKeyPairRequest) (response *api.CreateSSHKeyPairResponse, err error) {
+func (ss *ControlService) CreateSSHKeyPair(ctx context.Context, req *api.CreateSSHKeyPairRequest) (response *api.CreateSSHKeyPairResponse, err error) {
 	home := "/home/gitpod/"
+	userName := "gitpod"
 	if ss.privateKey != "" && ss.publicKey != "" {
 		checkKey := func() error {
 			data, err := os.ReadFile(filepath.Join(home, ".ssh/authorized_keys"))
@@ -733,47 +777,107 @@ func (ss *ControlService) CreateSSHKeyPair(context.Context, *api.CreateSSHKeyPai
 		if err == nil {
 			return &api.CreateSSHKeyPairResponse{
 				PrivateKey: ss.privateKey,
+				HostKey:    ss.hostKey,
+				UserName:   userName,
 			}, nil
 		}
 		log.WithError(err).Error("check authorized_keys failed, will recreate")
 	}
-	dir, err := os.MkdirTemp(os.TempDir(), "ssh-key-*")
-	if err != nil {
-		return nil, xerrors.Errorf("cannot create tmpfile: %w", err)
+	type keyPair struct{ PublicKey, PrivateKey []byte }
+	createRandomSSHKeyPair := func(ctx context.Context, home string) (*keyPair, error) {
+		dir, err := os.MkdirTemp(os.TempDir(), "ssh-key-*")
+		if err != nil {
+			return nil, xerrors.Errorf("cannot create tmpfile: %w", err)
+		}
+		err = prepareSSHKey(ctx, filepath.Join(dir, "ssh"))
+		if err != nil {
+			return nil, xerrors.Errorf("cannot create ssh key pair: %w", err)
+		}
+		bPublic, err := os.ReadFile(filepath.Join(dir, "ssh.pub"))
+		if err != nil {
+			return nil, xerrors.Errorf("cannot read publickey: %w", err)
+		}
+		bPrivate, err := os.ReadFile(filepath.Join(dir, "ssh"))
+		if err != nil {
+			return nil, xerrors.Errorf("cannot read privatekey: %w", err)
+		}
+		err = os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
+		if err != nil {
+			return nil, xerrors.Errorf("cannot create dir ~/.ssh/: %w", err)
+		}
+		f, err := os.OpenFile(filepath.Join(home, ".ssh/authorized_keys"), os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, xerrors.Errorf("cannot open file ~/.ssh/authorized_keys: %w", err)
+		}
+		_, err = f.Write(bPublic)
+		if err != nil {
+			return nil, xerrors.Errorf("cannot write file ~.ssh/authorized_keys: %w", err)
+		}
+		err = os.Chown(filepath.Join(home, ".ssh/authorized_keys"), gitpodUID, gitpodGID)
+		if err != nil {
+			return nil, xerrors.Errorf("cannot chown SSH authorized_keys file: %w", err)
+		}
+		return &keyPair{PublicKey: bPublic, PrivateKey: bPrivate}, nil
 	}
-	err = prepareSSHKey(context.Background(), filepath.Join(dir, "ssh"))
+	generated, err := createRandomSSHKeyPair(ctx, home)
 	if err != nil {
-		return nil, xerrors.Errorf("cannot create ssh key pair: %w", err)
+		return nil, status.Errorf(codes.Internal, "cannot create ssh key pair: %v", err)
 	}
-	bPublic, err := os.ReadFile(filepath.Join(dir, "ssh.pub"))
+	ss.privateKey = string(generated.PrivateKey)
+	ss.publicKey = string(generated.PublicKey)
+
+	hostKey, err := os.ReadFile("/.supervisor/ssh/sshkey.pub")
 	if err != nil {
-		return nil, xerrors.Errorf("cannot read publickey: %w", err)
+		log.WithError(err).Error("faled to read host key")
+	} else {
+		hostKeyParts := strings.Split(string(hostKey), " ")
+		if len(hostKeyParts) >= 2 {
+			ss.hostKey = &api.SSHPublicKey{
+				Type:  hostKeyParts[0],
+				Value: hostKeyParts[1],
+			}
+		}
 	}
-	bPrivate, err := os.ReadFile(filepath.Join(dir, "ssh"))
-	if err != nil {
-		return nil, xerrors.Errorf("cannot read privatekey: %w", err)
-	}
-	err = os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
-	if err != nil {
-		return nil, xerrors.Errorf("cannot create dir ~/.ssh/: %w", err)
-	}
-	f, err := os.OpenFile(filepath.Join(home, ".ssh/authorized_keys"), os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, xerrors.Errorf("cannot open file ~/.ssh/authorized_keys: %w", err)
-	}
-	_, err = f.Write(bPublic)
-	if err != nil {
-		return nil, xerrors.Errorf("cannot write file ~.ssh/authorized_keys: %w", err)
-	}
-	err = os.Chown(filepath.Join(home, ".ssh/authorized_keys"), gitpodUID, gitpodGID)
-	if err != nil {
-		return nil, xerrors.Errorf("cannot chown SSH authorized_keys file: %w", err)
-	}
-	ss.privateKey = string(bPrivate)
-	ss.publicKey = string(bPublic)
+
 	return &api.CreateSSHKeyPairResponse{
 		PrivateKey: ss.privateKey,
+		HostKey:    ss.hostKey,
+		UserName:   userName,
 	}, err
+}
+
+// CreateDebugEnv creates a debug workspace envs
+func (c *ControlService) CreateDebugEnv(ctx context.Context, req *api.CreateDebugEnvRequest) (*api.CreateDebugEnvResponse, error) {
+	var envs []string
+	for _, env := range os.Environ() {
+		if env == "" {
+			continue
+		}
+		parts := strings.SplitN(env, "=", 2)
+		key := parts[0]
+		// TODO all system envs should start with GITPOD_
+		// gp env shoud not allow to set env vars with GITPOD_ prefix
+		if strings.HasPrefix(key, "GITPOD_") || strings.HasPrefix(key, "THEIA_") || key == "VSX_REGISTRY_URL" {
+			envs = append(envs, env)
+		}
+	}
+	envs = append(envs, fmt.Sprintf("SUPERVISOR_DEBUG_WORKSPACE_TYPE=%d", req.GetWorkspaceType()))
+	envs = append(envs, fmt.Sprintf("SUPERVISOR_DEBUG_WORKSPACE_CONTENT_SOURCE=%d", req.GetContentSource()))
+	envs = append(envs, fmt.Sprintf("LOG_LEVEL=%s", req.GetLogLevel()))
+	envs = append(envs, fmt.Sprintf("GITPOD_TASKS=%s", req.GetTasks()))
+	envs = append(envs, fmt.Sprintf("GITPOD_WORKSPACE_URL=%s", req.GetWorkspaceUrl()))
+	envs = append(envs, fmt.Sprintf("GITPOD_REPO_ROOT=%s", req.GetCheckoutLocation()))
+	envs = append(envs, fmt.Sprintf("GITPOD_REPO_ROOTS=%s", req.GetCheckoutLocation()))
+	envs = append(envs, fmt.Sprintf("THEIA_WORKSPACE_ROOT=%s", req.GetWorkspaceLocation()))
+	envs = append(envs, fmt.Sprintf("GITPOD_PREVENT_METADATA_ACCESS=%s", "false"))
+	return &api.CreateDebugEnvResponse{
+		Envs: envs,
+	}, nil
+}
+
+func (c *ControlService) SendHeartBeat(ctx context.Context, req *api.SendHeartBeatRequest) (*api.SendHeartBeatResponse, error) {
+	err := c.gitpodService.SendHeartbeat(ctx)
+	return &api.SendHeartBeatResponse{}, err
 }
 
 // ContentState signals the workspace content state.
@@ -832,8 +936,8 @@ func (s *portService) RegisterGRPC(srv *grpc.Server) {
 	api.RegisterPortServiceServer(srv, s)
 }
 
-func (s *portService) RegisterREST(mux *runtime.ServeMux, grpcEndpoint string) error {
-	return api.RegisterPortServiceHandlerFromEndpoint(context.Background(), mux, grpcEndpoint, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
+func (s *portService) RegisterREST(ctx context.Context, mux *runtime.ServeMux, grpcEndpoint string) error {
+	return api.RegisterPortServiceHandlerFromEndpoint(ctx, mux, grpcEndpoint, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
 }
 
 // Tunnel opens a new tunnel.
@@ -937,4 +1041,158 @@ func (s *portService) RetryAutoExpose(ctx context.Context, req *api.RetryAutoExp
 // ResourcesStatus provides workspace resources status information.
 func (s *statusService) ResourcesStatus(ctx context.Context, in *api.ResourcesStatuRequest) (*api.ResourcesStatusResponse, error) {
 	return s.topService.data, nil
+}
+
+type taskService struct {
+	tasksManager    *tasksManager
+	willShutdownCtx context.Context
+	wg              *sync.WaitGroup
+
+	api.UnimplementedTaskServiceServer
+}
+
+func (s *taskService) RegisterGRPC(srv *grpc.Server) {
+	api.RegisterTaskServiceServer(srv, s)
+}
+func (s *taskService) RegisterREST(ctx context.Context, mux *runtime.ServeMux, grpcEndpoint string) error {
+	return api.RegisterPortServiceHandlerFromEndpoint(ctx, mux, grpcEndpoint, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
+}
+
+// ListenToOutput listens to the output of a task. It streams the output from the task's file and ends when the task's state changes to done.
+func (s *taskService) ListenToOutput(req *api.ListenToOutputRequest, srv api.TaskService_ListenToOutputServer) error {
+	s.wg.Add(1)
+	defer s.wg.Done()
+
+	taskStatus := s.tasksManager.getTaskStatus(req.TaskId)
+	if taskStatus == nil {
+		return status.Error(codes.NotFound, "task not found")
+	}
+
+	fileLocation := logs.PrebuildLogFileName(logs.TerminalStoreLocation, req.TaskId)
+	if _, err := os.Stat(fileLocation); os.IsNotExist(err) {
+		return status.Error(codes.Internal, "task file not found")
+	}
+
+	file, err := os.Open(fileLocation)
+	if err != nil {
+		return status.Error(codes.Internal, err.Error())
+	}
+	defer file.Close()
+
+	// Determine when the task is done
+	closedChannel := make(chan struct{})
+	closeClosedChannel := sync.OnceFunc(func() {
+		close(closedChannel)
+	})
+
+	sub := s.tasksManager.Subscribe()
+	if sub == nil {
+		log.Warn("potentially leaking subscription to tasks status: too many subscriptions")
+		return status.Error(codes.ResourceExhausted, "too many subscriptions")
+	}
+
+	go func() {
+		defer func() {
+			closeClosedChannel()
+			_ = sub.Close()
+		}()
+
+		if taskStatus.State == api.TaskState_closed {
+			return
+		}
+
+		for {
+			select {
+			case <-srv.Context().Done():
+				return
+			case updates := <-sub.Updates():
+				if updates == nil {
+					return
+				}
+				for _, update := range updates {
+					if update != nil && update.Id == req.TaskId && update.State == api.TaskState_closed {
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	// Read taskStatus again to make sure we did not miss it closing
+	freshTaskStatus := s.tasksManager.getTaskStatus(req.TaskId)
+	if freshTaskStatus == nil || freshTaskStatus.State == api.TaskState_closed {
+		// The task was present, but has been closed already: We close the channel here to:
+		//  - read until we hit EOF,
+		//  - and stop right after
+		closeClosedChannel()
+	}
+
+	// Setup fs watcher
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return status.Error(codes.Internal, fmt.Sprintf("Error creating the watcher: %s", err.Error()))
+	}
+	defer watcher.Close()
+
+	err = watcher.Add(fileLocation)
+	if err != nil {
+		return status.Error(codes.Internal, fmt.Sprintf("Error adding file to the watcher: %s", err.Error()))
+	}
+
+	// Do the actual reading
+	isClosed := false
+	buf := make([]byte, 4096)
+	reader := bufio.NewReader(file)
+	for {
+		continueReading := false
+		n, err := reader.Read(buf)
+		if n > 0 {
+			if err := srv.Send(&api.ListenToOutputResponse{Data: buf[:n]}); err != nil {
+				log.Printf("[prebuildlog]: error sending chunk: %s\n", err.Error())
+				return status.Error(codes.Internal, err.Error())
+			}
+
+			continueReading = true
+		} else if err == io.EOF {
+			if isClosed {
+				// We are done
+				log.Println("[prebuildlog]: closing because task state is done and we are done reading")
+				return nil
+			}
+		}
+		if err != nil && err != io.EOF {
+			return status.Error(codes.Internal, fmt.Sprintf("Error reading log file: %s", err.Error()))
+		}
+
+		if continueReading {
+			continue
+		}
+
+	SELECT:
+		select {
+		case <-srv.Context().Done():
+			log.Println("[prebuildlog]: closing because context done")
+			return nil
+		case <-s.willShutdownCtx.Done():
+			log.Println("[prebuildlog]: closing because willShutdownCtx fired")
+			return nil
+		case <-closedChannel:
+			isClosed = true
+			// The task got closed: Let's try to read one last time, to make sure we do not miss anything
+			continue
+		case event := <-watcher.Events:
+			if event.Op&fsnotify.Write != fsnotify.Write {
+				// Not relevant: select again
+				break SELECT
+			}
+			// File was written to, let's read it
+			continue
+
+		case err := <-watcher.Errors:
+			if err != nil {
+				log.Println("error:", err)
+				return status.Error(codes.Internal, fmt.Sprintf("Error watching log file: %s", err.Error()))
+			}
+		}
+	}
 }

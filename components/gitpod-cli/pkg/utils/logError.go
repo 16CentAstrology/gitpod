@@ -6,22 +6,20 @@ package utils
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
-	"google.golang.org/grpc"
 	"net/http"
 	"net/url"
 	"os"
 
-	gitpod "github.com/gitpod-io/gitpod/gitpod-cli/pkg/gitpod"
-	supervisor_helper "github.com/gitpod-io/gitpod/gitpod-cli/pkg/supervisor-helper"
+	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/gitpod"
 	ide_metrics "github.com/gitpod-io/gitpod/ide-metrics-api"
+	"github.com/gitpod-io/gitpod/supervisor/api"
 	"github.com/go-errors/errors"
 	log "github.com/sirupsen/logrus"
 )
 
-func LogError(ctx context.Context, errToReport error, errorMessage string) {
+func LogError(errToReport error, errorMessage string, wsInfo *api.WorkspaceInfoResponse) {
 	log.WithError(errToReport).Error(errorMessage)
 
 	file, err := os.OpenFile(os.TempDir()+"/gitpod-cli-errors.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
@@ -31,19 +29,7 @@ func LogError(ctx context.Context, errToReport error, errorMessage string) {
 		log.SetLevel(log.FatalLevel)
 	}
 
-	conn, err := supervisor_helper.Dial(ctx)
-	if err != nil {
-		log.WithError(err).Error(err)
-	}
-	defer func(conn *grpc.ClientConn) {
-		err := conn.Close()
-		if err != nil {
-			log.WithError(err).Error(err)
-		}
-	}(conn)
-
-	wsInfo, err := supervisor_helper.FetchInfo(ctx, conn)
-	if err != nil {
+	if wsInfo == nil {
 		log.WithError(err).Error("failed to retrieve workspace info")
 		return
 	}

@@ -5,8 +5,9 @@
  */
 
 import * as chai from "chai";
-import { suite, test } from "mocha-typescript";
+import { suite, test } from "@testdeck/mocha";
 import {
+    isWorkspaceId,
     matchesInstanceIdOrLegacyWorkspaceIdExactly,
     matchesNewWorkspaceIdExactly,
     parseWorkspaceIdFromHostname,
@@ -79,6 +80,19 @@ export class ParseWorkspaceIdTest {
     }
     @test public matchesWorkspaceIdExactly_new_negative() {
         const actual = matchesNewWorkspaceIdExactly("moccasin-ferret-15599b3");
+        expect(actual).to.be.false;
+    }
+
+    @test public isWorkspaceId_positive_new() {
+        const actual = isWorkspaceId("moccasin-ferret-155799b3");
+        expect(actual).to.be.true;
+    }
+    @test public isWorkspaceId_positive_legacy() {
+        const actual = isWorkspaceId("b7e0eaf8-ec73-44ec-81ea-04859263b656");
+        expect(actual).to.be.true;
+    }
+    @test public isWorkspaceId_negative_empty() {
+        const actual = isWorkspaceId(undefined);
         expect(actual).to.be.false;
     }
 }

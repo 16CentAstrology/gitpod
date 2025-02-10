@@ -107,6 +107,14 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 	return fd, nil
 }
 
+const (
+	// IWS backoff is the backoff configuration we use for interacting with the in-workspace service
+	iwsBackoffInitialWait = 10 * time.Millisecond
+	iwsBackoffSteps       = 6
+	iwsBackoffFactor      = 5
+	iwsBackoffMaxWait     = 2500 * time.Millisecond
+)
+
 // Handle actually listens on the seccomp notif FD and handles incoming requests.
 // This function returns when the notif FD is closed.
 func Handle(fd libseccomp.ScmpFd, handler SyscallHandler, wsid string) (stop chan<- struct{}, errchan <-chan error) {
@@ -211,10 +219,10 @@ type BindEvent struct {
 // Mount handles mount syscalls
 func (h *InWorkspaceHandler) Mount(req *libseccomp.ScmpNotifReq) (val uint64, errno int32, flags uint32) {
 	log := log.WithFields(map[string]interface{}{
-		"syscall":          "mount",
-		log.WorkspaceField: h.WorkspaceId,
-		"pid":              req.Pid,
-		"id":               req.ID,
+		"syscall":            "mount",
+		log.WorkspaceIDField: h.WorkspaceId,
+		"pid":                req.Pid,
+		"id":                 req.ID,
 	})
 
 	memFile, err := readarg.OpenMem(req.Pid)
@@ -246,13 +254,20 @@ func (h *InWorkspaceHandler) Mount(req *libseccomp.ScmpNotifReq) (val uint64, er
 		return Errno(unix.EFAULT)
 	}
 
+	var args string
+	if len(req.Data.Args) >= 5 && filesystem == "nfs4" {
+		args, err = readarg.ReadString(memFile, int64(req.Data.Args[4]))
+		log.WithField("arg", 4).WithError(err).Error("cannot read argument")
+	}
+
 	log.WithFields(map[string]interface{}{
 		"source": source,
 		"dest":   dest,
 		"fstype": filesystem,
-	}).Debug("handling mount syscall")
+		"args":   args,
+	}).Info("handling mount syscall")
 
-	if filesystem == "proc" || filesystem == "sysfs" {
+	if filesystem == "proc" || filesystem == "sysfs" || filesystem == "nfs4" {
 		// When a process wants to mount proc relative to `/proc/self` that path has no meaning outside of the processes' context.
 		// runc started doing this in https://github.com/opencontainers/runc/commit/0ca91f44f1664da834bc61115a849b56d22f595f
 		// TODO(cw): there must be a better way to handle this. Find one.
@@ -284,25 +299,56 @@ func (h *InWorkspaceHandler) Mount(req *libseccomp.ScmpNotifReq) (val uint64, er
 			}
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		iws, err := h.Daemon(ctx)
-		if err != nil {
-			log.WithField("target", target).WithField("dest", dest).WithField("mode", stat.Mode()).WithError(err).Errorf("cannot get IWS client to mount %s", filesystem)
-			return Errno(unix.EFAULT)
-		}
-		defer iws.Close()
+		wait := iwsBackoffInitialWait
+		for i := 0; i < iwsBackoffSteps; i++ {
+			err = func() error {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				iws, err := h.Daemon(ctx)
+				if err != nil {
+					log.WithField("target", target).WithField("dest", dest).WithField("mode", stat.Mode()).WithError(err).Errorf("cannot get IWS client to mount %s", filesystem)
+					return err
+				}
+				defer iws.Close()
 
-		call := iws.MountProc
-		if filesystem == "sysfs" {
-			call = iws.MountSysfs
+				call := iws.MountProc
+				if filesystem == "sysfs" {
+					call = iws.MountSysfs
+				}
+
+				if filesystem == "sysfs" || filesystem == "proc" {
+					_, err = call(ctx, &daemonapi.MountProcRequest{
+						Target: dest,
+						Pid:    int64(req.Pid),
+					})
+				} else if filesystem == "nfs4" {
+					_, err = iws.MountNfs(ctx, &daemonapi.MountNfsRequest{
+						Source: source,
+						Target: dest,
+						Args:   args,
+						Pid:    int64(req.Pid),
+					})
+				}
+
+				if err != nil {
+					log.WithField("target", dest).WithError(err).Errorf("cannot mount %s", filesystem)
+					return err
+				}
+				return nil
+			}()
+			if err != nil {
+				time.Sleep(wait)
+				wait = wait * iwsBackoffFactor
+				if wait > iwsBackoffMaxWait {
+					wait = iwsBackoffMaxWait
+				}
+			} else {
+				break
+			}
+
 		}
-		_, err = call(ctx, &daemonapi.MountProcRequest{
-			Target: dest,
-			Pid:    int64(req.Pid),
-		})
 		if err != nil {
-			log.WithField("target", dest).WithError(err).Errorf("cannot mount %s", filesystem)
+			// We've already logged the reason above
 			return Errno(unix.EFAULT)
 		}
 
@@ -317,10 +363,10 @@ func (h *InWorkspaceHandler) Mount(req *libseccomp.ScmpNotifReq) (val uint64, er
 func (h *InWorkspaceHandler) Umount(req *libseccomp.ScmpNotifReq) (val uint64, errno int32, flags uint32) {
 	nme, _ := req.Data.Syscall.GetName()
 	log := log.WithFields(map[string]interface{}{
-		"syscall":          nme,
-		log.WorkspaceField: h.WorkspaceId,
-		"pid":              req.Pid,
-		"id":               req.ID,
+		"syscall":            nme,
+		log.WorkspaceIDField: h.WorkspaceId,
+		"pid":                req.Pid,
+		"id":                 req.ID,
 	})
 
 	memFile, err := readarg.OpenMem(req.Pid)
@@ -397,10 +443,10 @@ func (h *InWorkspaceHandler) Umount(req *libseccomp.ScmpNotifReq) (val uint64, e
 
 func (h *InWorkspaceHandler) Bind(req *libseccomp.ScmpNotifReq) (val uint64, errno int32, flags uint32) {
 	log := log.WithFields(map[string]interface{}{
-		"syscall":          "bind",
-		log.WorkspaceField: h.WorkspaceId,
-		"pid":              req.Pid,
-		"id":               req.ID,
+		"syscall":            "bind",
+		log.WorkspaceIDField: h.WorkspaceId,
+		"pid":                req.Pid,
+		"id":                 req.ID,
 	})
 	// We want the syscall to succeed, no matter what we do in this handler.
 	// The Kernel will execute the syscall for us.
@@ -443,10 +489,10 @@ func (h *InWorkspaceHandler) Bind(req *libseccomp.ScmpNotifReq) (val uint64, err
 
 func (h *InWorkspaceHandler) Chown(req *libseccomp.ScmpNotifReq) (val uint64, errno int32, flags uint32) {
 	log := log.WithFields(map[string]interface{}{
-		"syscall":          "chown",
-		log.WorkspaceField: h.WorkspaceId,
-		"pid":              req.Pid,
-		"id":               req.ID,
+		"syscall":            "chown",
+		log.WorkspaceIDField: h.WorkspaceId,
+		"pid":                req.Pid,
+		"id":                 req.ID,
 	})
 
 	memFile, err := readarg.OpenMem(req.Pid)

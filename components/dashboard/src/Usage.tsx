@@ -4,19 +4,17 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { useContext } from "react";
+import { useCurrentOrg } from "./data/organizations/orgs-query";
+import { UsageView } from "./usage/UsageView";
 
-import UsageView from "./components/UsageView";
-import { UserContext } from "./user-context";
+function Usage() {
+    const org = useCurrentOrg().data;
 
-function TeamUsage() {
-    const { user } = useContext(UserContext);
-
-    if (!user) {
+    if (!org) {
         return <></>;
     }
 
-    return <UsageView attributionId={{ kind: "user", userId: user.id }} />;
+    return <UsageView attributionId={{ kind: "team", teamId: org.id }} />;
 }
 
-export default TeamUsage;
+export default Usage;

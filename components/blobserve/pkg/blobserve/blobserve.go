@@ -20,12 +20,12 @@ import (
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/remotes"
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/gorilla/mux"
 	"golang.org/x/xerrors"
 
+	blobserve_config "github.com/gitpod-io/gitpod/blobserve/pkg/config"
 	"github.com/gitpod-io/gitpod/common-go/log"
-	"github.com/gitpod-io/gitpod/common-go/util"
 )
 
 // ResolverProvider provides new resolver
@@ -33,8 +33,9 @@ type ResolverProvider func() remotes.Resolver
 
 // Server offers image blobs for download
 type Server struct {
-	Config   Config
-	Resolver ResolverProvider
+	Config     blobserve_config.BlobServe
+	Resolver   ResolverProvider
+	middleware mux.MiddlewareFunc
 
 	refstore *refstore
 }
@@ -42,40 +43,6 @@ type Server struct {
 type BlobserveInlineVars struct {
 	IDE             string `json:"ide"`
 	SupervisorImage string `json:"supervisor"`
-}
-
-type BlobSpace struct {
-	Location string `json:"location"`
-	MaxSize  int64  `json:"maxSizeBytes,omitempty"`
-}
-
-type Repo struct {
-	PrePull      []string            `json:"prePull,omitempty"`
-	Workdir      string              `json:"workdir,omitempty"`
-	Replacements []StringReplacement `json:"replacements,omitempty"`
-	InlineStatic []InlineReplacement `json:"inlineStatic,omitempty"`
-}
-
-// Config configures a server.
-type Config struct {
-	Port    int             `json:"port"`
-	Timeout util.Duration   `json:"timeout,omitempty"`
-	Repos   map[string]Repo `json:"repos"`
-	// AllowAnyRepo enables users to access any repo/image, irregardles if they're listed in the
-	// ref config or not.
-	AllowAnyRepo bool      `json:"allowAnyRepo"`
-	BlobSpace    BlobSpace `json:"blobSpace"`
-}
-
-type StringReplacement struct {
-	Path        string `json:"path"`
-	Search      string `json:"search"`
-	Replacement string `json:"replacement"`
-}
-
-type InlineReplacement struct {
-	Search      string `json:"search"`
-	Replacement string `json:"replacement"`
 }
 
 // From https://github.com/distribution/distribution/blob/v2.7.1/reference/regexp.go
@@ -115,16 +82,17 @@ var ReferenceRegexp = expression(reference.NameRegexp,
 	optional(literal("@"), reference.DigestRegexp))
 
 // NewServer creates a new blob server
-func NewServer(cfg Config, resolver ResolverProvider) (*Server, error) {
+func NewServer(cfg blobserve_config.BlobServe, resolver ResolverProvider, middleware mux.MiddlewareFunc) (*Server, error) {
 	refstore, err := newRefStore(cfg, resolver)
 	if err != nil {
 		return nil, err
 	}
 
 	s := &Server{
-		Config:   cfg,
-		Resolver: resolver,
-		refstore: refstore,
+		Config:     cfg,
+		Resolver:   resolver,
+		middleware: middleware,
+		refstore:   refstore,
 	}
 	for repo, repoCfg := range cfg.Repos {
 		for _, ver := range repoCfg.PrePull {
@@ -142,6 +110,7 @@ func NewServer(cfg Config, resolver ResolverProvider) (*Server, error) {
 // Serve serves the registry on the given port
 func (reg *Server) Serve() error {
 	r := mux.NewRouter()
+	r.Use(reg.middleware)
 	// path must be at least `/image-name:tag` (tag required)
 	// could also be like `/my-reg.com:8080/my/special_alpine:1.2.3/`
 	// or `/my-reg.com:8080/alpine:1.2.3/additional/path/will/be/ignored.json`
@@ -202,7 +171,7 @@ func (reg *Server) serve(w http.ResponseWriter, req *http.Request) {
 	repo := pref.Name()
 
 	var workdir string
-	var inlineReplacements []InlineReplacement
+	var inlineReplacements []blobserve_config.InlineReplacement
 	if cfg, ok := reg.Config.Repos[repo]; ok {
 		workdir = cfg.Workdir
 		inlineReplacements = cfg.InlineStatic
@@ -285,7 +254,7 @@ func (reg *Server) serve(w http.ResponseWriter, req *http.Request) {
 	http.StripPrefix(pathPrefix, http.FileServer(fs)).ServeHTTP(w, req)
 }
 
-func inlineVars(req *http.Request, r io.ReadSeeker, inlineReplacements []InlineReplacement) (io.ReadSeeker, error) {
+func inlineVars(req *http.Request, r io.ReadSeeker, inlineReplacements []blobserve_config.InlineReplacement) (io.ReadSeeker, error) {
 	inlineVarsValue := req.Header.Get("X-BlobServe-InlineVars")
 	if len(inlineReplacements) == 0 || inlineVarsValue == "" {
 		return r, nil

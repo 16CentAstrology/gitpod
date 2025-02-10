@@ -7,7 +7,7 @@
 import { User } from "@gitpod/gitpod-protocol";
 import * as chai from "chai";
 import { Container, ContainerModule } from "inversify";
-import { suite, test, timeout } from "mocha-typescript";
+import { suite, test, timeout, skip } from "@testdeck/mocha";
 import { AuthProviderParams } from "../auth/auth-provider";
 import { HostContextProvider } from "../auth/host-context-provider";
 import { DevData } from "../dev/dev-data";
@@ -16,9 +16,9 @@ import { BitbucketApiFactory, BasicAuthBitbucketApiFactory } from "./bitbucket-a
 import { BitbucketContextParser } from "./bitbucket-context-parser";
 import { BitbucketTokenHelper } from "./bitbucket-token-handler";
 const expect = chai.expect;
-import { skipIfEnvVarNotSet } from "@gitpod/gitpod-protocol/lib/util/skip-if";
+import { ifEnvVarNotSet } from "@gitpod/gitpod-protocol/lib/util/skip-if";
 
-@suite(timeout(10000), skipIfEnvVarNotSet("GITPOD_TEST_TOKEN_BITBUCKET"))
+@suite(timeout(10000), skip(ifEnvVarNotSet("GITPOD_TEST_TOKEN_BITBUCKET")))
 class TestBitbucketContextParser {
     protected parser: BitbucketContextParser;
     protected user: User;
@@ -49,8 +49,6 @@ class TestBitbucketContextParser {
                 bind(BitbucketTokenHelper).toSelf().inSingletonScope();
                 bind(TokenProvider).toConstantValue(<TokenProvider>{
                     getTokenForHost: async () => DevData.createBitbucketTestToken(),
-                    getFreshPortAuthenticationToken: async (user: User, workspaceId: string) =>
-                        DevData.createPortAuthTestToken(workspaceId),
                 });
                 bind(BitbucketApiFactory).to(BasicAuthBitbucketApiFactory).inSingletonScope();
                 bind(HostContextProvider).toConstantValue({
@@ -87,6 +85,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -111,6 +110,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -135,6 +135,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -159,6 +160,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -183,6 +185,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -207,6 +210,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -231,6 +235,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -255,6 +260,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -279,6 +285,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -303,6 +310,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -327,6 +335,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -351,6 +360,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -375,6 +385,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -399,6 +410,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -419,6 +431,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -432,6 +445,7 @@ class TestBitbucketContextParser {
                     host: "bitbucket.org",
                     owner: "gitpod",
                     name: "integration-tests",
+                    displayName: "Integration Tests",
                     cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                     defaultBranch: "master",
                     private: false,
@@ -454,6 +468,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "corneliusltf",
                 name: "sample-repository",
+                displayName: "Sample Repository",
                 cloneUrl: "https://bitbucket.org/corneliusltf/sample-repository.git",
                 defaultBranch: "master",
                 private: false,
@@ -463,6 +478,7 @@ class TestBitbucketContextParser {
                         defaultBranch: "master",
                         host: "bitbucket.org",
                         name: "integration-tests",
+                        displayName: "Integration Tests",
                         owner: "gitpod",
                         private: false,
                     },
@@ -477,6 +493,7 @@ class TestBitbucketContextParser {
                     host: "bitbucket.org",
                     owner: "gitpod",
                     name: "integration-tests",
+                    displayName: "Integration Tests",
                     cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                     defaultBranch: "master",
                     private: false,
@@ -499,6 +516,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests",
+                displayName: "Integration Tests",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests.git",
                 defaultBranch: "master",
                 private: false,
@@ -527,6 +545,7 @@ class TestBitbucketContextParser {
                 host: "bitbucket.org",
                 owner: "gitpod",
                 name: "integration-tests-forked-repository",
+                displayName: "integration-tests-forked-repository",
                 cloneUrl: "https://bitbucket.org/gitpod/integration-tests-forked-repository.git",
                 defaultBranch: "master",
                 private: false,
@@ -536,6 +555,7 @@ class TestBitbucketContextParser {
                         defaultBranch: "master",
                         host: "bitbucket.org",
                         name: "my-sample-repo",
+                        displayName: "my-sample-repo",
                         owner: "corneliusludmann",
                         private: false,
                     },

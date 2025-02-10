@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gitpod-io/gitpod/installer/pkg/components/workspace"
+	wsmanagermk2 "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager-mk2"
 	configv1 "github.com/gitpod-io/gitpod/installer/pkg/config/v1"
 	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
 
@@ -36,6 +37,19 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 	gitpodInstallationWorkspaceHostSuffix := fmt.Sprintf(".ws%s.%s", installationShortNameSuffix, ctx.Config.Domain)
 	gitpodInstallationWorkspaceHostSuffixRegex := fmt.Sprintf("\\.ws[^\\.]*\\.%s", ctx.Config.Domain)
 
+	wsManagerConfig := &config.WorkspaceManagerConn{
+		Addr: fmt.Sprintf("ws-manager-mk2:%d", wsmanagermk2.RPCPort),
+		TLS: struct {
+			CA   string "json:\"ca\""
+			Cert string "json:\"crt\""
+			Key  string "json:\"key\""
+		}{
+			CA:   "/ws-manager-client-tls-certs/ca.crt",
+			Cert: "/ws-manager-client-tls-certs/tls.crt",
+			Key:  "/ws-manager-client-tls-certs/tls.key",
+		},
+	}
+
 	ctx.WithExperimental(func(ucfg *experimental.Config) error {
 		if ucfg.Workspace == nil {
 			return nil
@@ -55,9 +69,11 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 		if ucfg.Workspace.WSProxy.GitpodInstallationWorkspaceHostSuffixRegex != "" {
 			gitpodInstallationWorkspaceHostSuffixRegex = ucfg.Workspace.WSProxy.GitpodInstallationWorkspaceHostSuffixRegex
 		}
+
 		return nil
 	})
 
+	// todo(sje): wsManagerProxy seems to be unused
 	wspcfg := config.Config{
 		Namespace: ctx.Namespace,
 		Ingress: proxy.HostBasedIngressConfig{
@@ -91,9 +107,12 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 				WorkspaceHostSuffixRegex: gitpodInstallationWorkspaceHostSuffixRegex,
 			},
 			WorkspacePodConfig: &proxy.WorkspacePodConfig{
-				TheiaPort:       workspace.ContainerPort,
-				SupervisorPort:  workspace.SupervisorPort,
-				SupervisorImage: ctx.ImageName(ctx.Config.Repository, workspace.SupervisorImage, ctx.VersionManifest.Components.Workspace.Supervisor.Version),
+				TheiaPort:               workspace.ContainerPort,
+				IDEDebugPort:            workspace.IDEDebugPort,
+				SupervisorPort:          workspace.SupervisorPort,
+				SupervisorDebugPort:     workspace.SupervisorDebugPort,
+				DebugWorkspaceProxyPort: workspace.DebugWorkspaceProxyPort,
+				SupervisorImage:         ctx.ImageName(ctx.Config.Repository, workspace.SupervisorImage, ctx.VersionManifest.Components.Workspace.Supervisor.Version),
 			},
 			BuiltinPages: proxy.BuiltinPagesConfig{
 				Location: "/app/public",
@@ -102,18 +121,11 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 		PProfAddr:          common.LocalhostAddressFromPort(baseserver.BuiltinDebugPort),
 		PrometheusAddr:     common.LocalhostPrometheusAddr(),
 		ReadinessProbeAddr: fmt.Sprintf(":%v", ReadinessPort),
-		WorkspaceManager: &config.WorkspaceManagerConn{
-			Addr: "ws-manager:8080",
-			TLS: struct {
-				CA   string "json:\"ca\""
-				Cert string "json:\"crt\""
-				Key  string "json:\"key\""
-			}{
-				CA:   "/ws-manager-client-tls-certs/ca.crt",
-				Cert: "/ws-manager-client-tls-certs/tls.crt",
-				Key:  "/ws-manager-client-tls-certs/tls.key",
-			},
-		},
+		WorkspaceManager:   wsManagerConfig,
+	}
+
+	if ctx.Config.SSHGatewayCAKey != nil {
+		wspcfg.Proxy.SSHGatewayCAKeyFile = "/mnt/ca-key/ca.key"
 	}
 
 	fc, err := common.ToJSONString(wspcfg)

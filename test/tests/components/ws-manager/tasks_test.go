@@ -40,29 +40,18 @@ func TestRegularWorkspaceTasks(t *testing.T) {
 			},
 			LookForFile: []string{"init-ran", "before-ran", "command-ran"},
 		},
-		/*
-			{
-				Name: "pvc",
-				Task: []gitpod.TasksItems{
-					{Init: fmt.Sprintf("touch %s/init-ran; exit", wsLoc)},
-					{Before: fmt.Sprintf("touch %s/before-ran; exit", wsLoc)},
-					{Command: fmt.Sprintf("touch %s/command-ran; exit", wsLoc)},
-				},
-				LookForFile: []string{"init-ran", "before-ran", "command-ran"},
-				FF:          []wsmanapi.WorkspaceFeatureFlag{wsmanapi.WorkspaceFeatureFlag_PERSISTENT_VOLUME_CLAIM},
-			},
-		*/
 	}
 
 	f := features.New("ws-manager").
 		WithLabel("component", "ws-manager").
 		WithLabel("type", "tasks").
-		Assess("it can run workspace tasks", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		Assess("it can run workspace tasks", func(testCtx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			for _, test := range tests {
+				test := test
 				t.Run(test.Name, func(t *testing.T) {
 					t.Parallel()
 
-					ctx, cancel := context.WithTimeout(context.Background(), time.Duration(5*len(tests))*time.Minute)
+					ctx, cancel := context.WithTimeout(testCtx, time.Duration(5*len(tests))*time.Minute)
 					defer cancel()
 
 					api := integration.NewComponentAPI(ctx, cfg.Namespace(), kubeconfig, cfg.Client())
@@ -180,7 +169,7 @@ func TestRegularWorkspaceTasks(t *testing.T) {
 				})
 			}
 
-			return ctx
+			return testCtx
 		}).
 		Feature()
 

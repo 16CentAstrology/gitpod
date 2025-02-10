@@ -16,6 +16,13 @@ export class DBUser implements User {
     @PrimaryColumn(TypeORM.UUID_COLUMN_TYPE)
     id: string;
 
+    @Column({
+        ...TypeORM.UUID_COLUMN_TYPE,
+        default: "",
+        transformer: Transformer.MAP_EMPTY_STR_TO_UNDEFINED,
+    })
+    organizationId?: string;
+
     @Column("varchar")
     @Index("ind_creationDate")
     creationDate: string;
@@ -96,4 +103,10 @@ export class DBUser implements User {
         transformer: Transformer.MAP_EMPTY_STR_TO_UNDEFINED,
     })
     verificationPhoneNumber?: string;
+
+    @Column({
+        default: 0,
+        transformer: Transformer.MAP_ZERO_TO_UNDEFINED,
+    })
+    fgaRelationshipsVersion?: number;
 }

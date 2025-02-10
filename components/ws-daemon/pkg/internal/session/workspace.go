@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/opentracing/opentracing-go"
@@ -57,15 +56,15 @@ type Workspace struct {
 	// workspace resides. If this workspace has no Git working copy, this field is an empty string.
 	CheckoutLocation string `json:"checkoutLocation"`
 
-	CreatedAt             time.Time        `json:"createdAt"`
-	DoBackup              bool             `json:"doBackup"`
-	Owner                 string           `json:"owner"`
-	WorkspaceID           string           `json:"metaID"`
-	InstanceID            string           `json:"workspaceID"`
-	LastGitStatus         *csapi.GitStatus `json:"lastGitStatus"`
-	FullWorkspaceBackup   bool             `json:"fullWorkspaceBackup"`
-	PersistentVolumeClaim bool             `json:"persistentVolumeClaim"`
-	ContentManifest       []byte           `json:"contentManifest"`
+	CreatedAt time.Time `json:"createdAt"`
+	DoBackup  bool      `json:"doBackup"`
+	// DoWipe is a mode that a) does not make backups and b) ensures leaving a clean slate on workspace stop
+	DoWipe          bool             `json:"doWipe"`
+	Owner           string           `json:"owner"`
+	WorkspaceID     string           `json:"metaID"`
+	InstanceID      string           `json:"workspaceID"`
+	LastGitStatus   *csapi.GitStatus `json:"lastGitStatus"`
+	ContentManifest []byte           `json:"contentManifest"`
 
 	ServiceLocNode   string `json:"serviceLocNode"`
 	ServiceLocDaemon string `json:"serviceLocDaemon"`
@@ -76,11 +75,6 @@ type Workspace struct {
 	XFSProjectID int `json:"xfsProjectID"`
 
 	NonPersistentAttrs map[string]interface{} `json:"-"`
-
-	store              *Store
-	state              WorkspaceState
-	stateLock          sync.RWMutex
-	operatingCondition *sync.Cond
 }
 
 // OWI produces the owner, workspace, instance log metadata from the information
@@ -93,7 +87,7 @@ func (s *Workspace) OWI() logrus.Fields {
 type WorkspaceState string
 
 const (
-	// WorkspaceInitializing means the workspace content is is currently being initialized
+	// WorkspaceInitializing means the workspace content is currently being initialized
 	WorkspaceInitializing WorkspaceState = "initializing"
 	// WorkspaceReady means the workspace content is available on disk
 	WorkspaceReady WorkspaceState = "ready"
@@ -104,101 +98,12 @@ const (
 	WorkspaceDisposed WorkspaceState = "disposed"
 )
 
-// WaitForInit waits until this workspace is initialized
-func (s *Workspace) WaitForInit(ctx context.Context) (ready bool) {
-	//nolint:ineffassign,staticcheck
-	span, ctx := opentracing.StartSpanFromContext(ctx, "workspace.WaitForInit")
-	defer tracing.FinishSpan(span, nil)
-
-	s.stateLock.RLock()
-	if s.state == WorkspaceReady {
-		s.stateLock.RUnlock()
-		return true
-	} else if s.state != WorkspaceInitializing {
-		s.stateLock.RUnlock()
-		return false
-	}
-	s.stateLock.RUnlock()
-
-	s.operatingCondition.L.Lock()
-	s.operatingCondition.Wait()
-	// make sure that state is indeed ready when done waiting
-	ready = s.state == WorkspaceReady
-	s.operatingCondition.L.Unlock()
-	return
-}
-
-// MarkInitDone marks this workspace as initialized and writes this workspace to disk so that it can be restored should ws-daemon crash/be restarted
-func (s *Workspace) MarkInitDone(ctx context.Context) (err error) {
-	//nolint:ineffassign,staticcheck
-	span, ctx := opentracing.StartSpanFromContext(ctx, "workspace.MarkInitDone")
-	defer tracing.FinishSpan(span, &err)
-
-	// We persist before changing state so that we only mark everything as ready
-	// if we actually have a persistent workspace. Otherwise we might have wsman thinking
-	// something different than a restarted ws-daemon.
-	err = s.persist()
-	if err != nil {
-		return xerrors.Errorf("cannot mark init done: %w", err)
-	}
-
-	s.stateLock.Lock()
-	s.state = WorkspaceReady
-	s.operatingCondition.Broadcast()
-	s.stateLock.Unlock()
-
-	err = s.store.runLifecycleHooks(ctx, s)
-	if err != nil {
-		return err
-	}
-
-	// Now that the rest of the world know's we're ready, we have to remember that ourselves.
-	err = s.persist()
-	if err != nil {
-		return xerrors.Errorf("cannot mark init done: %w", err)
-	}
-
-	return nil
-}
-
-// WaitOrMarkForDisposal marks the workspace as disposing, or if it's already in that state waits until it's actually disposed
-func (s *Workspace) WaitOrMarkForDisposal(ctx context.Context) (done bool, repo *csapi.GitStatus, err error) {
-	//nolint:ineffassign,staticcheck
-	span, ctx := opentracing.StartSpanFromContext(ctx, "workspace.WaitOrMarkForDisposal")
-	defer tracing.FinishSpan(span, &err)
-
-	s.stateLock.Lock()
-	if s.state == WorkspaceDisposed {
-		s.stateLock.Unlock()
-		return true, nil, nil
-	} else if s.state != WorkspaceDisposing {
-		s.state = WorkspaceDisposing
-		s.stateLock.Unlock()
-
-		err = s.persist()
-		if err != nil {
-			return false, nil, xerrors.Errorf("cannot mark as disposing: %w", err)
-		}
-
-		err = s.store.runLifecycleHooks(ctx, s)
-		if err != nil {
-			return false, nil, err
-		}
-
-		return false, nil, nil
-	}
-	s.stateLock.Unlock()
-
-	s.operatingCondition.L.Lock()
-	s.operatingCondition.Wait()
-	done = true
-	repo = s.LastGitStatus
-	s.operatingCondition.L.Unlock()
-	return
-}
+// WorkspaceLivecycleHook can modify a workspace's non-persistent state.
+// They're intended to start regular operations or initialize non-persistent objects.
+type WorkspaceLivecycleHook func(ctx context.Context, ws *Workspace) error
 
 // Dispose marks the workspace as disposed and clears it from disk
-func (s *Workspace) Dispose(ctx context.Context) (err error) {
+func (s *Workspace) Dispose(ctx context.Context, hooks []WorkspaceLivecycleHook) (err error) {
 	//nolint:ineffassign,staticcheck
 	span, ctx := opentracing.StartSpanFromContext(ctx, "workspace.Dispose")
 	defer tracing.FinishSpan(span, &err)
@@ -208,31 +113,21 @@ func (s *Workspace) Dispose(ctx context.Context) (err error) {
 	err = os.Remove(s.persistentStateLocation())
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			log.WithError(err).Warn("workspace persistent state location not exist")
+			log.WithError(err).WithFields(s.OWI()).Warn("workspace persistent state location not exist")
 			err = nil
 		} else {
 			return xerrors.Errorf("cannot remove workspace persistent state location: %w", err)
 		}
 	}
 
-	s.stateLock.Lock()
-	s.state = WorkspaceDisposed
-	s.operatingCondition.Broadcast()
-	s.stateLock.Unlock()
-
-	err = s.store.runLifecycleHooks(ctx, s)
-	if err != nil {
-		return err
+	for _, h := range hooks {
+		err := h(ctx, s)
+		if err != nil {
+			return err
+		}
 	}
 
-	if s.PersistentVolumeClaim {
-		// nothing to dispose as files are on persistent volume claim
-		return nil
-	}
-
-	if !s.FullWorkspaceBackup {
-		err = os.RemoveAll(s.Location)
-	}
+	err = os.RemoveAll(s.Location)
 	if err != nil {
 		return xerrors.Errorf("cannot remove workspace all: %w", err)
 	}
@@ -240,77 +135,34 @@ func (s *Workspace) Dispose(ctx context.Context) (err error) {
 	return nil
 }
 
-// IsReady returns true if the workspace is in the ready state
-func (s *Workspace) IsReady() bool {
-	s.stateLock.RLock()
-	r := s.state == WorkspaceReady
-	s.stateLock.RUnlock()
-	return r
-}
-
-// IsDisposing returns true if the workspace is in the disposing/disposed state
-func (s *Workspace) IsDisposing() bool {
-	s.stateLock.RLock()
-	r := s.state == WorkspaceDisposing || s.state == WorkspaceDisposed
-	s.stateLock.RUnlock()
-	return r
-}
-
-// SetGitStatus sets the last git status field and persists the change
-func (s *Workspace) SetGitStatus(status *csapi.GitStatus) error {
-	s.stateLock.Lock()
-	s.LastGitStatus = status
-	s.stateLock.Unlock()
-
-	return s.persist()
-}
-
 // UpdateGitStatus attempts to update the LastGitStatus from the workspace's local working copy.
-func (s *Workspace) UpdateGitStatus(ctx context.Context, persistentVolumeClaim bool) (res *csapi.GitStatus, err error) {
+func (s *Workspace) UpdateGitStatus(ctx context.Context) (res *csapi.GitStatus, err error) {
 	var loc string
-	if persistentVolumeClaim {
-		loc = filepath.Join(s.ServiceLocDaemon, "prestophookdata")
-		stat, err := git.GitStatusFromFiles(ctx, loc)
-		if err != nil {
-			return nil, err
-		}
 
-		s.LastGitStatus = toGitStatus(stat)
-	} else {
-		loc = s.Location
-		if loc == "" {
-			// FWB workspaces don't have `Location` set, but rather ServiceLocDaemon and ServiceLocNode.
-			// We'd can't easily produce the Git status, because in this context `mark` isn't mounted, and `upper`
-			// only contains the full git working copy if the content was just initialised.
-			// Something like
-			//   loc = filepath.Join(s.ServiceLocDaemon, "mark", "workspace")
-			// does not work.
-			//
-			// TODO(cw): figure out a way to get ahold of the Git status.
-			log.WithField("loc", loc).WithFields(s.OWI()).Debug("not updating Git status of FWB workspace")
-			return
-		}
-
-		loc = filepath.Join(loc, s.CheckoutLocation)
-		if !git.IsWorkingCopy(loc) {
-			log.WithField("loc", loc).WithField("checkout location", s.CheckoutLocation).WithFields(s.OWI()).Debug("did not find a Git working copy - not updating Git status")
-			return nil, nil
-		}
-
-		c := git.Client{Location: loc}
-
-		stat, err := c.Status(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		s.LastGitStatus = toGitStatus(stat)
+	loc = s.Location
+	if loc == "" {
+		log.WithField("loc", loc).WithFields(s.OWI()).Debug("not updating Git status of FWB workspace")
+		return
 	}
 
-	err = s.persist()
+	loc = filepath.Join(loc, s.CheckoutLocation)
+	if !git.IsWorkingCopy(loc) {
+		log.WithField("loc", loc).WithField("checkout location", s.CheckoutLocation).WithFields(s.OWI()).Debug("did not find a Git working copy - not updating Git status")
+		return nil, nil
+	}
+
+	c := git.Client{Location: loc}
+
+	stat, err := c.Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	s.LastGitStatus = toGitStatus(stat)
+
+	err = s.Persist()
 	if err != nil {
 		log.WithError(err).WithFields(s.OWI()).Warn("cannot persist latest Git status")
-		err = nil
 	}
 
 	return s.LastGitStatus, nil
@@ -337,21 +189,14 @@ func toGitStatus(s *git.Status) *csapi.GitStatus {
 	}
 }
 
-type persistentWorkspace struct {
-	*Workspace
-	State WorkspaceState `json:"state"`
-}
-
 func (s *Workspace) persistentStateLocation() string {
-	return filepath.Join(s.store.Location, fmt.Sprintf("%s.workspace.json", s.InstanceID))
+	return filepath.Join(filepath.Dir(s.Location), fmt.Sprintf("%s.workspace.json", s.InstanceID))
 }
 
-func (s *Workspace) persist() error {
-	s.stateLock.RLock()
-	fc, err := json.Marshal(persistentWorkspace{s, s.state})
-	s.stateLock.RUnlock()
+func (s *Workspace) Persist() error {
+	fc, err := json.Marshal(s)
 	if err != nil {
-		return xerrors.Errorf("cannot persist workspace: %w", err)
+		return xerrors.Errorf("cannot marshal workspace: %w", err)
 	}
 
 	err = os.WriteFile(s.persistentStateLocation(), fc, 0644)
@@ -362,26 +207,21 @@ func (s *Workspace) persist() error {
 	return nil
 }
 
-func loadWorkspace(ctx context.Context, path string) (sess *Workspace, err error) {
-	//nolint:ineffassign
-	span, ctx := opentracing.StartSpanFromContext(ctx, "loadWorkspace")
+func LoadWorkspace(ctx context.Context, path string) (sess *Workspace, err error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "loadWorkspace")
 	defer tracing.FinishSpan(span, &err)
 
 	fc, err := os.ReadFile(path)
 	if err != nil {
-		return nil, xerrors.Errorf("cannot load session file: %w", err)
+		return nil, fmt.Errorf("cannot load session file: %w", err)
 	}
 
-	var p persistentWorkspace
-	err = json.Unmarshal(fc, &p)
+	var workspace Workspace
+	err = json.Unmarshal(fc, &workspace)
 	if err != nil {
-		return nil, xerrors.Errorf("cannot load session file: %w", err)
+		return nil, fmt.Errorf("cannot unmarshal session file: %w", err)
 	}
 
-	res := p.Workspace
-	res.NonPersistentAttrs = make(map[string]interface{})
-	res.state = p.State
-	res.operatingCondition = sync.NewCond(&sync.Mutex{})
-
-	return res, nil
+	workspace.NonPersistentAttrs = make(map[string]interface{})
+	return &workspace, nil
 }

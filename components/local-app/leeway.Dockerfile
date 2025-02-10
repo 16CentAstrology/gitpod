@@ -1,22 +1,11 @@
-# Copyright (c) 2021 Gitpod GmbH. All rights reserved.
+# Copyright (c) 2023 Gitpod GmbH. All rights reserved.
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM alpine:3.16
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:1ec3327af43d7af231ffe475aff88d49dbb5e09af9f28610e6afbd2cb096e751
 
 WORKDIR /app
-COPY components-local-app--app/components-local-app--app-linux-amd64/local-app local-app-linux
-COPY components-local-app--app/components-local-app--app-darwin-amd64/local-app local-app-darwin
-COPY components-local-app--app/components-local-app--app-windows-amd64/local-app.exe local-app-windows.exe
-
-COPY components-local-app--app/components-local-app--app-linux-amd64/local-app local-app-linux-amd64
-COPY components-local-app--app/components-local-app--app-darwin-amd64/local-app local-app-darwin-amd64
-COPY components-local-app--app/components-local-app--app-windows-amd64/local-app.exe local-app-windows-amd64.exe
-
-COPY components-local-app--app/components-local-app--app-linux-arm64/local-app local-app-linux-arm64
-COPY components-local-app--app/components-local-app--app-darwin-arm64/local-app local-app-darwin-arm64
-COPY components-local-app--app/components-local-app--app-windows-arm64/local-app.exe local-app-windows-arm64.exe
-COPY components-local-app--app/components-local-app--app-windows-386/local-app.exe local-app-windows-386.exe
+COPY components-local-app--app-with-manifest/bin/* ./
 
 ARG __GIT_COMMIT
 ARG VERSION

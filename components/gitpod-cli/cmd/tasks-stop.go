@@ -7,18 +7,19 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
-	supervisor_helper "github.com/gitpod-io/gitpod/gitpod-cli/pkg/supervisor-helper"
+	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/supervisor"
+	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/utils"
 	"github.com/gitpod-io/gitpod/supervisor/api"
-	supervisor "github.com/gitpod-io/gitpod/supervisor/api"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
+	"golang.org/x/xerrors"
 )
 
 var stopTaskCmdOpts struct {
-	All bool
+	All          bool
+	ForceSuccess bool
 }
 
 // stopTaskCmd represents the stop task command
@@ -26,64 +27,57 @@ var stopTaskCmd = &cobra.Command{
 	Use:   "stop <id>",
 	Short: "Stop a workspace task",
 	Args:  cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+		defer cancel()
+
 		var (
 			terminalAliases []string
-			ctx             context.Context
-			cancel          context.CancelFunc
 		)
 
-		terminalClient, err := supervisor_helper.GetTerminalServiceClient(context.Background())
-
+		client, err := supervisor.New(ctx)
 		if err != nil {
-			log.Fatalf("cannot get terminal service: %s", err)
-			return
+			return xerrors.Errorf("cannot get task list: %w", err)
 		}
-
-		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+		defer client.Close()
 
 		all, _ := cmd.Flags().GetBool("all")
 
 		if all {
-			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			tasks, err := supervisor_helper.GetTasksListByState(ctx, supervisor.TaskState_running)
+			tasks, err := client.GetTasksListByState(ctx, api.TaskState_running)
 
 			if err != nil {
-				log.Fatalf("cannot get task list: %s", err)
-				return
+				return xerrors.Errorf("cannot get task list: %w", err)
 			}
 
 			if len(tasks) == 0 {
 				fmt.Println("There are no running tasks")
-				return
+				return nil
 			}
 
 			for _, task := range tasks {
 				terminalAliases = append(terminalAliases, task.Terminal)
 			}
 		} else if len(args) > 0 {
-			_, err := terminalClient.Get(ctx, &api.GetTerminalRequest{
+			_, err := client.Terminal.Get(ctx, &api.GetTerminalRequest{
 				Alias: args[0],
 			})
 
 			if err != nil {
-				fmt.Printf("The selected task was not found or already stopped: %s.\nMake sure to use the correct task ID.\nUse 'gp tasks list' to obtain the task id or run 'gp tasks stop' to select the desired task\n", args[0])
-				return
+				msg := fmt.Sprintf("The selected task was not found or already stopped: %s.\nMake sure to use the correct task ID.\nUse 'gp tasks list' to obtain the task id or run 'gp tasks stop' to select the desired task\n", args[0])
+				return GpError{Err: err, Message: msg, OutCome: utils.Outcome_UserErr}
 			}
 
 			terminalAliases = append(terminalAliases, args[0])
 		} else {
-			tasks, err := supervisor_helper.GetTasksListByState(ctx, supervisor.TaskState_running)
+			tasks, err := client.GetTasksListByState(ctx, api.TaskState_running)
 			if err != nil {
-				log.Fatalf("cannot get task list: %s", err)
+				return xerrors.Errorf("cannot get task list: %w", err)
 			}
 
 			if len(tasks) == 0 {
 				fmt.Println("There are no running tasks")
-				return
+				return nil
 			}
 
 			var taskNames []string
@@ -106,11 +100,11 @@ var stopTaskCmd = &cobra.Command{
 				selectedIndex, selectedValue, err := prompt.Run()
 
 				if selectedValue == "" {
-					return
+					return nil
 				}
 
 				if err != nil {
-					log.Fatalf("error occurred with the input prompt: %s", err)
+					return xerrors.Errorf("error occurred with the input prompt: %w", err)
 				}
 
 				taskIndex = selectedIndex
@@ -120,12 +114,12 @@ var stopTaskCmd = &cobra.Command{
 		}
 
 		for _, terminalAlias := range terminalAliases {
-			_, err := terminalClient.Shutdown(context.Background(), &supervisor.ShutdownTerminalRequest{Alias: terminalAlias})
+			_, err = client.Terminal.Shutdown(ctx, &api.ShutdownTerminalRequest{Alias: terminalAlias, ForceSuccess: stopTaskCmdOpts.ForceSuccess})
 			if err != nil {
-				log.Fatalf("cannot stop task: %s", err)
-				return
+				return xerrors.Errorf("cannot stop task: %w", err)
 			}
 		}
+		return nil
 	},
 }
 
@@ -133,4 +127,5 @@ func init() {
 	tasksCmd.AddCommand(stopTaskCmd)
 
 	stopTaskCmd.Flags().BoolVarP(&stopTaskCmdOpts.All, "all", "a", false, "stop all tasks")
+	stopTaskCmd.Flags().BoolVarP(&stopTaskCmdOpts.ForceSuccess, "force-success", "f", false, "force the task to exit with status code 0")
 }

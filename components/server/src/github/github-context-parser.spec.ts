@@ -10,7 +10,7 @@ if (typeof (Symbol as any).asyncIterator === "undefined") {
 }
 import "reflect-metadata";
 
-import { suite, test, timeout, retries } from "mocha-typescript";
+import { suite, test, timeout, retries, skip } from "@testdeck/mocha";
 import * as chai from "chai";
 const expect = chai.expect;
 
@@ -25,9 +25,9 @@ import { AuthProviderParams } from "../auth/auth-provider";
 import { TokenProvider } from "../user/token-provider";
 import { GitHubTokenHelper } from "./github-token-helper";
 import { HostContextProvider } from "../auth/host-context-provider";
-import { skipIfEnvVarNotSet } from "@gitpod/gitpod-protocol/lib/util/skip-if";
+import { ifEnvVarNotSet } from "@gitpod/gitpod-protocol/lib/util/skip-if";
 
-@suite(timeout(10000), retries(2), skipIfEnvVarNotSet("GITPOD_TEST_TOKEN_GITHUB"))
+@suite(timeout(10000), retries(2), skip(ifEnvVarNotSet("GITPOD_TEST_TOKEN_GITHUB")))
 class TestGithubContextParser {
     protected parser: GithubContextParser;
     protected user: User;
@@ -87,11 +87,12 @@ class TestGithubContextParser {
 
     static readonly BLO_BLA_ERROR_DATA = {
         host: "github.com",
-        lastUpdate: undefined,
+        lastUpdate: "",
         owner: "blo",
         repoName: "bla",
         userIsOwner: false,
         userScopes: ["user:email", "public_repo", "repo"],
+        errorMessage: "Could not resolve to a Repository with the name 'blo/bla'.",
     };
 
     protected getTestBranches(): BranchRef[] {
@@ -150,6 +151,7 @@ class TestGithubContextParser {
                 owner: "eclipse-theia",
                 name: "theia",
                 cloneUrl: "https://github.com/eclipse-theia/theia.git",
+                defaultBranch: "master",
                 private: false,
             },
             title: "eclipse-theia/theia - master",
@@ -168,6 +170,7 @@ class TestGithubContextParser {
                 owner: "eclipse-theia",
                 name: "theia",
                 cloneUrl: "https://github.com/eclipse-theia/theia.git",
+                defaultBranch: "master",
                 private: false,
             },
             title: "eclipse-theia/theia - master",
@@ -178,18 +181,19 @@ class TestGithubContextParser {
         const result = await this.parser.handle(
             {},
             this.user,
-            "https://github.com/eclipse-theia/theia/tree/master/LICENSE",
+            "https://github.com/eclipse-theia/theia/tree/master/LICENSE-EPL",
         );
         expect(result).to.deep.include({
             ref: "master",
             refType: "branch",
-            path: "LICENSE",
+            path: "LICENSE-EPL",
             isFile: true,
             repository: {
                 host: "github.com",
                 owner: "eclipse-theia",
                 name: "theia",
                 cloneUrl: "https://github.com/eclipse-theia/theia.git",
+                defaultBranch: "master",
                 private: false,
             },
             title: "eclipse-theia/theia - master",
@@ -212,6 +216,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             title: "gitpod-io/gitpod-test-repo - nametest/src",
@@ -231,6 +236,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             revision: "499efbbcb50e7e6e5e2883053f72a34cd5396be3",
@@ -252,6 +258,7 @@ class TestGithubContextParser {
                 owner: "Snailclimb",
                 name: "JavaGuide",
                 cloneUrl: "https://github.com/Snailclimb/JavaGuide.git",
+                defaultBranch: "main",
                 private: false,
             },
             revision: "940982ebffa5f376b6baddeaf9ed41c91217a6b6",
@@ -272,6 +279,7 @@ class TestGithubContextParser {
                 owner: "eclipse-theia",
                 name: "theia",
                 cloneUrl: "https://github.com/eclipse-theia/theia.git",
+                defaultBranch: "master",
                 private: false,
             },
             title: "eclipse-theia/theia - master",
@@ -287,6 +295,7 @@ class TestGithubContextParser {
                 owner: "eclipse-theia",
                 name: "theia",
                 cloneUrl: "https://github.com/eclipse-theia/theia.git",
+                defaultBranch: "master",
                 private: false,
             },
             revision: "f29626847a14ca50dd78483aebaf4b4fe26bcb73",
@@ -311,6 +320,7 @@ class TestGithubContextParser {
             revision: "25ece59c495d525614f28971d41d5708a31bf1e3",
             repository: {
                 cloneUrl: "https://github.com/gitpod-io/gitpod.git",
+                defaultBranch: "main",
                 host: "github.com",
                 name: "gitpod",
                 owner: "gitpod-io",
@@ -335,6 +345,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             title: "gitpod-io/gitpod-test-repo - 4test",
@@ -358,6 +369,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             title: "gitpod-io/gitpod-test-repo - Test 3",
@@ -397,6 +409,7 @@ class TestGithubContextParser {
                 owner: "eclipse-theia",
                 name: "theia",
                 cloneUrl: "https://github.com/eclipse-theia/theia.git",
+                defaultBranch: "master",
                 private: false,
             },
             ref: "master",
@@ -408,10 +421,12 @@ class TestGithubContextParser {
                     owner: "TypeFox",
                     name: "theia",
                     cloneUrl: "https://github.com/TypeFox/theia.git",
+                    defaultBranch: "master",
                     private: false,
                     fork: {
                         parent: {
                             cloneUrl: "https://github.com/eclipse-theia/theia.git",
+                            defaultBranch: undefined,
                             host: "github.com",
                             name: "theia",
                             owner: "eclipse-theia",
@@ -434,6 +449,7 @@ class TestGithubContextParser {
                 owner: "eclipse-theia",
                 name: "theia",
                 cloneUrl: "https://github.com/eclipse-theia/theia.git",
+                defaultBranch: "master",
                 private: false,
             },
             ref: "master",
@@ -445,10 +461,12 @@ class TestGithubContextParser {
                     owner: "TypeFox",
                     name: "theia",
                     cloneUrl: "https://github.com/TypeFox/theia.git",
+                    defaultBranch: "master",
                     private: false,
                     fork: {
                         parent: {
                             cloneUrl: "https://github.com/eclipse-theia/theia.git",
+                            defaultBranch: undefined, // default branch isn't computed for the fork network
                             host: "github.com",
                             name: "theia",
                             owner: "eclipse-theia",
@@ -475,6 +493,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             owner: "gitpod-io",
@@ -494,6 +513,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             ref: "1test",
@@ -510,6 +530,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             owner: "gitpod-io",
@@ -533,6 +554,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             revision: "aba298d5084a817cdde3dd1f26692bc2a216e2b9",
@@ -554,6 +576,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             revision: "499efbbcb50e7e6e5e2883053f72a34cd5396be3",
@@ -575,6 +598,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             revision: "499efbbcb50e7e6e5e2883053f72a34cd5396be3",
@@ -596,6 +620,7 @@ class TestGithubContextParser {
                 owner: "gitpod-io",
                 name: "gitpod-test-repo",
                 cloneUrl: "https://github.com/gitpod-io/gitpod-test-repo.git",
+                defaultBranch: "1test",
                 private: false,
             },
             revision: "499efbbcb50e7e6e5e2883053f72a34cd5396be3",

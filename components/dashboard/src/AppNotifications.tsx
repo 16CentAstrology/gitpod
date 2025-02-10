@@ -1,114 +1,265 @@
 /**
- * Copyright (c) 2022 Gitpod GmbH. All rights reserved.
+ * Copyright (c) 2023 Gitpod GmbH. All rights reserved.
  * Licensed under the GNU Affero General Public License (AGPL).
- * See License.AGPL.txt in the project root for license information.
+ * See License-AGPL.txt in the project root for license information.
  */
 
-import { useEffect, useState } from "react";
-import Alert from "./components/Alert";
-import { getGitpodService, gitpodHostUrl } from "./service/service";
+import dayjs from "dayjs";
+import { useCallback, useEffect, useState } from "react";
+import Alert, { AlertType } from "./components/Alert";
+import { useUserLoader } from "./hooks/use-user-loader";
+import { isGitpodIo } from "./utils";
+import { trackEvent } from "./Analytics";
+import { useUpdateCurrentUserMutation } from "./data/current-user/update-mutation";
+import { User as UserProtocol } from "@gitpod/gitpod-protocol";
+import { User } from "@gitpod/public-api/lib/gitpod/v1/user_pb";
+import { useCurrentOrg } from "./data/organizations/orgs-query";
+import { AttributionId } from "@gitpod/gitpod-protocol/lib/attribution";
+import { getGitpodService } from "./service/service";
+import { useOrgBillingMode } from "./data/billing-mode/org-billing-mode-query";
+import { Organization } from "@gitpod/public-api/lib/gitpod/v1/organization_pb";
 
-const KEY_APP_NOTIFICATIONS = "gitpod-app-notifications";
+const KEY_APP_DISMISSED_NOTIFICATIONS = "gitpod-app-notifications-dismissed";
+const PRIVACY_POLICY_LAST_UPDATED = "2024-12-03";
 
-export function AppNotifications() {
-    const [notifications, setNotifications] = useState<string[]>([]);
+interface Notification {
+    id: string;
+    type: AlertType;
+    message: JSX.Element;
+    preventDismiss?: boolean;
+    onClose?: () => void;
+}
 
-    useEffect(() => {
-        let localState = getLocalStorageObject(KEY_APP_NOTIFICATIONS);
-        if (Array.isArray(localState)) {
-            setNotifications(localState);
-            return;
-        }
-        reloadNotifications().catch(console.error);
+const UPDATED_PRIVACY_POLICY = (updateUser: (user: Partial<UserProtocol>) => Promise<User>) => {
+    return {
+        id: "privacy-policy-update",
+        type: "info",
+        preventDismiss: true,
+        onClose: async () => {
+            let dismissSuccess = false;
+            try {
+                const updatedUser = await updateUser({
+                    additionalData: { profile: { acceptedPrivacyPolicyDate: dayjs().toISOString() } },
+                });
+                dismissSuccess = !!updatedUser;
+            } catch (err) {
+                console.error("Failed to update user's privacy policy acceptance date", err);
+                dismissSuccess = false;
+            } finally {
+                trackEvent("privacy_policy_update_accepted", {
+                    path: window.location.pathname,
+                    success: dismissSuccess,
+                });
+            }
+        },
+        message: (
+            <span className="text-md">
+                We've updated our Privacy Policy. You can review it{" "}
+                <a className="gp-link" href="https://www.gitpod.io/privacy" target="_blank" rel="noreferrer">
+                    here
+                </a>
+                .
+            </span>
+        ),
+    } as Notification;
+};
 
-        getGitpodService().registerClient({
-            onNotificationUpdated: () => reloadNotifications().catch(console.error),
-        });
-    }, []);
-
-    const reloadNotifications = async () => {
-        const serverState = await getGitpodService().server.getNotifications();
-        setNotifications(serverState);
-        removeLocalStorageObject(KEY_APP_NOTIFICATIONS);
-        if (serverState.length > 0) {
-            setLocalStorageObject(KEY_APP_NOTIFICATIONS, serverState, /* expires in */ 300 /* seconds */);
-        }
-    };
-
-    const topNotification = notifications[0];
-
-    if (topNotification === undefined) {
-        return null;
-    }
-
-    const dismissNotification = () => {
-        removeLocalStorageObject(KEY_APP_NOTIFICATIONS);
-        setNotifications([]);
-    };
-
-    const getManageBilling = () => {
-        let href;
-        if (notifications.length === 1) {
-            href = `${gitpodHostUrl}billing`;
-        } else if (notifications.length === 2) {
-            href = `${gitpodHostUrl}t/${notifications[notifications.length - 1]}/billing`;
-        }
-        return (
-            <span>
-                {" "}
-                Manage
-                <a className="gp-link hover:text-gray-600" href={href}>
-                    {" "}
-                    billing.
+const GITPOD_FLEX_INTRODUCTION_COACHMARK_KEY = "gitpod_flex_introduction";
+const GITPOD_FLEX_INTRODUCTION = (updateUser: (user: Partial<UserProtocol>) => Promise<User>) => {
+    return {
+        id: GITPOD_FLEX_INTRODUCTION_COACHMARK_KEY,
+        type: "info",
+        preventDismiss: true,
+        onClose: async () => {
+            let dismissSuccess = false;
+            try {
+                const updatedUser = await updateUser({
+                    additionalData: {
+                        profile: {
+                            coachmarksDismissals: {
+                                [GITPOD_FLEX_INTRODUCTION_COACHMARK_KEY]: new Date().toISOString(),
+                            },
+                        },
+                    },
+                });
+                dismissSuccess = !!updatedUser;
+            } catch (err) {
+                dismissSuccess = false;
+            } finally {
+                trackEvent("coachmark_dismissed", {
+                    name: "gitpod-flex-introduction",
+                    success: dismissSuccess,
+                });
+            }
+        },
+        message: (
+            <span className="text-md">
+                <b>Introducing Gitpod Flex:</b> self-host for free in 3 min or run locally using Gitpod Desktop |{" "}
+                <a
+                    className="text-kumquat-ripe font-bold"
+                    href="https://app.gitpod.io"
+                    target="_blank"
+                    rel="noreferrer"
+                >
+                    Try now
                 </a>
             </span>
-        );
-    };
+        ),
+    } as Notification;
+};
+
+const INVALID_BILLING_ADDRESS = (stripePortalUrl: string | undefined) => {
+    return {
+        id: "invalid-billing-address",
+        type: "warning",
+        preventDismiss: true,
+        message: (
+            <span className="text-md">
+                Invalid billing address: tax calculations may be affected. Ensure your address includes Country, City,
+                State, and Zip code. Update your details{" "}
+                <a
+                    href={`${stripePortalUrl}/customer/update`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="gp-link"
+                >
+                    here
+                </a>
+                .
+            </span>
+        ),
+    } as Notification;
+};
+
+export function AppNotifications() {
+    const [topNotification, setTopNotification] = useState<Notification | undefined>(undefined);
+    const { user, loading } = useUserLoader();
+    const { mutateAsync } = useUpdateCurrentUserMutation();
+
+    const currentOrg = useCurrentOrg().data;
+    const { data: billingMode } = useOrgBillingMode();
+
+    useEffect(() => {
+        let ignore = false;
+
+        const updateNotifications = async () => {
+            const notifications = [];
+            if (!loading) {
+                if (
+                    isGitpodIo() &&
+                    (!user?.profile?.acceptedPrivacyPolicyDate ||
+                        new Date(PRIVACY_POLICY_LAST_UPDATED) > new Date(user.profile.acceptedPrivacyPolicyDate))
+                ) {
+                    notifications.push(UPDATED_PRIVACY_POLICY((u: Partial<UserProtocol>) => mutateAsync(u)));
+                }
+
+                if (isGitpodIo() && currentOrg && billingMode?.mode === "usage-based") {
+                    const notification = await checkForInvalidBillingAddress(currentOrg);
+                    if (notification) {
+                        notifications.push(notification);
+                    }
+                }
+
+                if (isGitpodIo() && !user?.profile?.coachmarksDismissals[GITPOD_FLEX_INTRODUCTION_COACHMARK_KEY]) {
+                    notifications.push(GITPOD_FLEX_INTRODUCTION((u: Partial<UserProtocol>) => mutateAsync(u)));
+                }
+            }
+
+            if (!ignore) {
+                const dismissedNotifications = getDismissedNotifications();
+                const topNotification = notifications.find((n) => !dismissedNotifications.includes(n.id));
+                setTopNotification(topNotification);
+            }
+        };
+        updateNotifications();
+
+        return () => {
+            ignore = true;
+        };
+    }, [loading, mutateAsync, user, currentOrg, billingMode]);
+
+    const dismissNotification = useCallback(() => {
+        if (!topNotification) {
+            return;
+        }
+
+        const dismissedNotifications = getDismissedNotifications();
+        dismissedNotifications.push(topNotification.id);
+        setDismissedNotifications(dismissedNotifications);
+        setTopNotification(undefined);
+    }, [topNotification, setTopNotification]);
+
+    if (!topNotification) {
+        return <></>;
+    }
 
     return (
         <div className="app-container pt-2">
             <Alert
-                type={"warning"}
+                type={topNotification.type}
                 closable={true}
-                onClose={() => dismissNotification()}
+                onClose={() => {
+                    if (!topNotification.preventDismiss) {
+                        dismissNotification();
+                    } else {
+                        if (topNotification.onClose) {
+                            topNotification.onClose();
+                        }
+                    }
+                }}
                 showIcon={true}
                 className="flex rounded mb-2 w-full"
             >
-                {topNotification}
-                {getManageBilling()}
+                <span>{topNotification.message}</span>
             </Alert>
         </div>
     );
 }
 
-function getLocalStorageObject(key: string): any {
+async function checkForInvalidBillingAddress(org: Organization): Promise<Notification | undefined> {
     try {
-        const string = window.localStorage.getItem(key);
-        if (!string) {
-            return;
-        }
-        const stored = JSON.parse(string);
-        if (Date.now() > stored.expirationTime) {
-            window.localStorage.removeItem(key);
+        const attributionId = AttributionId.render(AttributionId.createFromOrganizationId(org.id));
+
+        const subscriptionId = await getGitpodService().server.findStripeSubscriptionId(attributionId);
+        if (!subscriptionId) {
             return undefined;
         }
-        return stored.value;
-    } catch (error) {
-        window.localStorage.removeItem(key);
+
+        const invalidBillingAddress = await getGitpodService().server.isCustomerBillingAddressInvalid(attributionId);
+        if (!invalidBillingAddress) {
+            return undefined;
+        }
+
+        const stripePortalUrl = await getGitpodService().server.getStripePortalUrl(attributionId);
+        return INVALID_BILLING_ADDRESS(stripePortalUrl);
+    } catch (err) {
+        // On error we don't want to block but still would like to report against metrics
+        console.debug("failed to determine 'invalid billing address' state", err);
+        return undefined;
     }
 }
 
-function removeLocalStorageObject(key: string): void {
-    window.localStorage.removeItem(key);
+function getDismissedNotifications(): string[] {
+    try {
+        const str = window.localStorage.getItem(KEY_APP_DISMISSED_NOTIFICATIONS);
+        const parsed = JSON.parse(str || "[]");
+        if (!Array.isArray(parsed)) {
+            window.localStorage.removeItem(KEY_APP_DISMISSED_NOTIFICATIONS);
+            return [];
+        }
+        return parsed;
+    } catch (err) {
+        console.debug("Failed to parse dismissed notifications", err);
+        window.localStorage.removeItem(KEY_APP_DISMISSED_NOTIFICATIONS);
+        return [];
+    }
 }
 
-function setLocalStorageObject(key: string, object: Object, expiresInSeconds: number): void {
+function setDismissedNotifications(ids: string[]) {
     try {
-        window.localStorage.setItem(
-            key,
-            JSON.stringify({ expirationTime: Date.now() + expiresInSeconds * 1000, value: object }),
-        );
-    } catch (error) {
-        console.error("Setting localstorage item failed", key, object, error);
+        window.localStorage.setItem(KEY_APP_DISMISSED_NOTIFICATIONS, JSON.stringify(ids));
+    } catch (err) {
+        console.debug("Failed to set dismissed notifications", err);
+        window.localStorage.removeItem(KEY_APP_DISMISSED_NOTIFICATIONS);
     }
 }

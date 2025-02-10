@@ -7,6 +7,7 @@ package agentsmith
 import (
 	"github.com/gitpod-io/gitpod/installer/pkg/cluster"
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
+	wsmanagermk2 "github.com/gitpod-io/gitpod/installer/pkg/components/ws-manager-mk2"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -45,12 +46,12 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 					Annotations: common.CustomizeAnnotation(ctx, Component, common.TypeMetaDaemonset),
 				},
 				Spec: corev1.PodSpec{
-					Affinity:                      common.NodeAffinity(cluster.AffinityLabelWorkspacesRegular, cluster.AffinityLabelWorkspacesHeadless),
+					Affinity:                      cluster.WithNodeAffinity(cluster.AffinityLabelWorkspacesRegular, cluster.AffinityLabelWorkspacesHeadless),
 					ServiceAccountName:            Component,
 					HostPID:                       true,
 					EnableServiceLinks:            pointer.Bool(false),
-					DNSPolicy:                     "ClusterFirst",
-					RestartPolicy:                 "Always",
+					DNSPolicy:                     corev1.DNSClusterFirst,
+					RestartPolicy:                 corev1.RestartPolicyAlways,
 					TerminationGracePeriodSeconds: pointer.Int64(30),
 					Containers: []corev1.Container{{
 						Name:            Component,
@@ -63,10 +64,18 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 								"memory": resource.MustParse("32Mi"),
 							},
 						}),
-						VolumeMounts: []corev1.VolumeMount{{
-							Name:      "config",
-							MountPath: "/config",
-						}},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "config",
+								MountPath: "/config",
+							},
+							{
+								Name:      "wsman-tls-certs",
+								MountPath: "/wsman-certs",
+								ReadOnly:  true,
+							},
+							common.CAVolumeMount(),
+						},
 						Env: common.CustomizeEnvvar(ctx, Component, common.MergeEnv(
 							common.DefaultEnv(&ctx.Config),
 							common.WorkspaceTracingEnv(ctx, Component),
@@ -76,15 +85,29 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 							Privileged: pointer.Bool(true),
 							ProcMount:  func() *corev1.ProcMountType { r := corev1.DefaultProcMount; return &r }(),
 						},
-					}, *common.KubeRBACProxyContainer(ctx)},
-					Volumes: []corev1.Volume{{
-						Name: "config",
-						VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: Component},
-						}},
-					}},
+					},
+						*common.KubeRBACProxyContainer(ctx),
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "config",
+							VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+								LocalObjectReference: corev1.LocalObjectReference{Name: Component},
+							}},
+						},
+						{
+							Name: "wsman-tls-certs",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: wsmanagermk2.TLSSecretNameClient,
+								},
+							},
+						},
+						common.CAVolume(),
+					},
 				},
 			},
+			UpdateStrategy: common.DaemonSetRolloutStrategy(),
 		},
 	}}, nil
 }

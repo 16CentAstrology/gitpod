@@ -2,12 +2,12 @@
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM alpine:3.16 as dl
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:1ec3327af43d7af231ffe475aff88d49dbb5e09af9f28610e6afbd2cb096e751 as dl
 WORKDIR /dl
 RUN apk add --no-cache curl file \
-  && curl -OsSL https://github.com/opencontainers/runc/releases/download/v1.1.4/runc.amd64 \
+  && curl -OsSL https://github.com/opencontainers/runc/releases/download/v1.1.12/runc.amd64 \
   && chmod +x runc.amd64 \
-  && if ! file runc.amd64 | grep -iq "ELF 64-bit LSB executable"; then echo "runc.amd64 is not a binary file"; exit 1;fi
+  && if ! file runc.amd64 | grep -iq "ELF 64-bit LSB pie executable"; then echo "runc.amd64 is not a binary file"; exit 1;fi
 
 FROM ubuntu:22.04
 
@@ -15,7 +15,7 @@ FROM ubuntu:22.04
 ENV TRIGGER_REBUILD=1
 
 ## Installing coreutils is super important here as otherwise the loopback device creation fails!
-ARG CLOUD_SDK_VERSION=402.0.0
+ARG CLOUD_SDK_VERSION=467.0.0
 ENV CLOUD_SDK_VERSION=$CLOUD_SDK_VERSION
 ENV CLOUDSDK_CORE_DISABLE_PROMPTS=1
 
@@ -31,6 +31,7 @@ RUN apt update \
       python3-crcmod \
       aria2 \
       lvm2 \
+      nfs-common \
   && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
   && curl -sSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - \
   && apt update && apt install -y --no-install-recommends  google-cloud-sdk=${CLOUD_SDK_VERSION}-0 \
@@ -55,7 +56,6 @@ RUN groupadd -r -g 33333 gitpod \
 COPY components-ws-daemon--app/ws-daemon /app/ws-daemond
 COPY components-ws-daemon--content-initializer/ws-daemon /app/content-initializer
 COPY components-ws-daemon-nsinsider--app/nsinsider /app/nsinsider
-COPY dev-ready-probe-labeler--app/ready-probe-labeler /app/ready-probe-labeler
 
 COPY default.gitconfig /etc/gitconfig
 COPY default.gitconfig /home/gitpod/.gitconfig

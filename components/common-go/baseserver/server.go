@@ -7,6 +7,7 @@ package baseserver
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -15,9 +16,12 @@ import (
 	"syscall"
 
 	common_grpc "github.com/gitpod-io/gitpod/common-go/grpc"
+	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/pprof"
+	"github.com/gitpod-io/gitpod/common-go/tracing"
 	grpc_logrus "github.com/grpc-ecosystem/go-grpc-middleware/logging/logrus"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"github.com/opentracing/opentracing-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -43,6 +47,7 @@ func New(name string, opts ...Option) (*Server, error) {
 		options: options,
 	}
 	server.builtinServices = newBuiltinServices(server)
+	server.tracingCloser = tracing.Init(name)
 
 	server.httpMux = http.NewServeMux()
 	server.http = &http.Server{Handler: std.Handler("", middleware.New(middleware.Config{
@@ -97,6 +102,8 @@ type Server struct {
 	// grpc is a grpc Server, only used when port is specified in cfg
 	grpc         *grpc.Server
 	grpcListener net.Listener
+
+	tracingCloser io.Closer
 
 	// listening indicates the server is serving. When closed, the server is in the process of graceful termination.
 	listening chan struct{}
@@ -198,6 +205,10 @@ func (s *Server) MetricsRegistry() *prometheus.Registry {
 	return s.options.metricsRegistry
 }
 
+func (s *Server) Tracer() opentracing.Tracer {
+	return opentracing.GlobalTracer()
+}
+
 func (s *Server) close(ctx context.Context) error {
 	if s.listening == nil {
 		return fmt.Errorf("server is not running, invalid close operation")
@@ -234,6 +245,11 @@ func (s *Server) close(ctx context.Context) error {
 		return fmt.Errorf("failed to close debug server: %w", err)
 	}
 	s.Logger().Info("Debug server terminated.")
+
+	err = s.tracingCloser.Close()
+	if err != nil {
+		return fmt.Errorf("failed to close tracing: %w", err)
+	}
 
 	return nil
 }
@@ -333,6 +349,10 @@ func (s *Server) initializeMetrics() error {
 		return fmt.Errorf("failed to register baseserver metrics: %w", err)
 	}
 
+	if err := s.MetricsRegistry().Register(log.DefaultMetrics); err != nil {
+		return fmt.Errorf("failed to register log metrics: %w", err)
+	}
+
 	reportServerVersion(s.options.version)
 
 	return nil
@@ -353,7 +373,14 @@ func (s *Server) HealthAddr() string {
 func (s *Server) HTTPAddress() string {
 	return httpAddress(s.options.config.Services.HTTP, s.httpListener)
 }
-func (s *Server) GRPCAddress() string { return s.options.config.Services.GRPC.GetAddress() }
+func (s *Server) GRPCAddress() string {
+	// If the server hasn't started, it won't have a listener yet
+	if s.grpcListener == nil {
+		return ""
+	}
+
+	return s.grpcListener.Addr().String()
+}
 
 const (
 	BuiltinDebugPort   = 6060

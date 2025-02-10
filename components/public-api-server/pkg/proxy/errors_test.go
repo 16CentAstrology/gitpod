@@ -5,6 +5,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -17,55 +18,87 @@ import (
 
 func TestConvertError(t *testing.T) {
 	scenarios := []struct {
-		WebsocketError error
-		ExpectedError  error
+		Input         error
+		ExpectedError error
 	}{
 		{
-			WebsocketError: &protocol.ErrBadHandshake{
+			Input: &protocol.ErrBadHandshake{
 				URL: "https://foo.bar",
 			},
 			ExpectedError: connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("Failed to establish caller identity")),
 		},
 		{
-			WebsocketError: &jsonrpc2.Error{
+			Input: &jsonrpc2.Error{
 				Code:    400,
 				Message: "user id is a required argument",
 			},
 			ExpectedError: connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("user id is a required argument")),
 		},
 		{
-			WebsocketError: &jsonrpc2.Error{
-				Code:    -32603,
-				Message: "Request getWorkspace failed with message: No workspace with id 'some-id' found.",
+			Input: &jsonrpc2.Error{
+				Code:    401,
+				Message: "user is not authenticated",
 			},
-			ExpectedError: connect.NewError(connect.CodeInternal, fmt.Errorf("Request getWorkspace failed with message: No workspace with id 'some-id' found.")),
+			ExpectedError: connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("user is not authenticated")),
 		},
 		{
-			WebsocketError: &jsonrpc2.Error{
+			Input: &jsonrpc2.Error{
 				Code:    409,
 				Message: "already exists",
 			},
 			ExpectedError: connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("already exists")),
 		},
 		{
-			WebsocketError: &jsonrpc2.Error{
+			Input: &jsonrpc2.Error{
+				Code:    429,
+				Message: "too many requests",
+			},
+			ExpectedError: connect.NewError(connect.CodeResourceExhausted, fmt.Errorf("too many requests")),
+		},
+		{
+			Input: &jsonrpc2.Error{
 				Code:    470,
 				Message: "user blocked",
 			},
 			ExpectedError: connect.NewError(connect.CodePermissionDenied, fmt.Errorf("user blocked")),
 		},
 		{
-			WebsocketError: nil,
-			ExpectedError:  nil,
+			Input: &jsonrpc2.Error{
+				Code:    499,
+				Message: "catch all client error",
+			},
+			ExpectedError: connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("catch all client error")),
 		},
 		{
-			WebsocketError: errors.New("some other random error returns internal error"),
-			ExpectedError:  connect.NewError(connect.CodeInternal, fmt.Errorf("some other random error returns internal error")),
+			Input: &jsonrpc2.Error{
+				Code:    599,
+				Message: "catch all server error",
+			},
+			ExpectedError: connect.NewError(connect.CodeInternal, fmt.Errorf("catch all server error")),
+		},
+		{
+			Input: &jsonrpc2.Error{
+				Code:    -32603,
+				Message: "Request getWorkspace failed with message: No workspace with id 'some-id' found.",
+			},
+			ExpectedError: connect.NewError(connect.CodeInternal, fmt.Errorf("Request getWorkspace failed with message: No workspace with id 'some-id' found.")),
+		},
+		{
+			Input:         nil,
+			ExpectedError: nil,
+		},
+		{
+			Input:         errors.New("some other random error returns internal error"),
+			ExpectedError: connect.NewError(connect.CodeInternal, fmt.Errorf("some other random error returns internal error")),
+		},
+		{
+			Input:         context.Canceled,
+			ExpectedError: connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("Request timed out")),
 		},
 	}
 
 	for _, s := range scenarios {
-		converted := ConvertError(s.WebsocketError)
-		require.Equal(t, s.ExpectedError, converted)
+		converted := ConvertError(s.Input)
+		require.Equal(t, s.ExpectedError, converted, s.Input)
 	}
 }

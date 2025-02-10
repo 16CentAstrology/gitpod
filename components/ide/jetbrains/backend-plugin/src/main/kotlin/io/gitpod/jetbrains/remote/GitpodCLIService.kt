@@ -5,8 +5,10 @@
 package io.gitpod.jetbrains.remote
 
 import com.intellij.codeWithMe.ClientId
+import com.intellij.codeWithMe.asContextElement
 import com.intellij.ide.BrowserUtil
 import com.intellij.ide.CommandLineProcessor
+import com.intellij.openapi.client.ClientKind
 import com.intellij.openapi.client.ClientSession
 import com.intellij.openapi.client.ClientSessionsManager
 import com.intellij.openapi.components.service
@@ -49,6 +51,9 @@ class GitpodCLIService : RestService() {
         /**
          * prod: curl http://localhost:63342/api/gitpod/cli?op=metrics
          * dev:  curl http://localhost:63343/api/gitpod/cli?op=metrics
+         *
+         * We will use this endpoint in JetBrains launcher to check if backend-plugin is ready.
+         * Please make sure this operation:metrics to respond 200
          */
         if (operation == "metrics") {
             val out = BufferExposingByteArrayOutputStream()
@@ -106,12 +111,12 @@ class GitpodCLIService : RestService() {
     }
 
     private fun withClient(request: FullHttpRequest, context: ChannelHandlerContext, action: suspend (project: Project?) -> Unit): String? {
-        GlobalScope.launch {
-            getClientSessionAndProjectAsync().let { (session, project) ->
-                ClientId.withClientId(session.clientId) {
-                    action(project)
-                    sendOk(request, context)
-                }
+        val scope = CoroutineScope(Dispatchers.Default)
+        scope.launch {
+            val (session, project) = getClientSessionAndProjectAsync()
+            withContext(session.clientId.asContextElement()) {
+                action(project)
+                sendOk(request, context)
             }
         }
         return null
@@ -124,10 +129,10 @@ class GitpodCLIService : RestService() {
         var session: ClientSession? = null
         while (session == null) {
             if (project != null) {
-                session = ClientSessionsManager.getProjectSessions(project, false).firstOrNull()
+                session = ClientSessionsManager.getProjectSessions(project, ClientKind.REMOTE).firstOrNull()
             }
             if (session == null) {
-                session = ClientSessionsManager.getAppSessions(false).firstOrNull()
+                session = ClientSessionsManager.getAppSessions(ClientKind.REMOTE).firstOrNull()
             }
             if (session == null) {
                 delay(1000L)

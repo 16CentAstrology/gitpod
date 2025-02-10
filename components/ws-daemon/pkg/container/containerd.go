@@ -7,9 +7,11 @@ package container
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,9 +20,12 @@ import (
 	"github.com/containerd/containerd/api/events"
 	"github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/api/types"
+	"github.com/containerd/containerd/api/types/task"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/containerd/images"
+	"github.com/containerd/platforms"
+	"github.com/containerd/typeurl/v2"
 	ocispecs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opentracing/opentracing-go"
 	"golang.org/x/xerrors"
@@ -28,6 +33,7 @@ import (
 	wsk8s "github.com/gitpod-io/gitpod/common-go/kubernetes"
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/tracing"
+	workspacev1 "github.com/gitpod-io/gitpod/ws-manager/api/crd/v1"
 )
 
 const (
@@ -38,7 +44,7 @@ const (
 )
 
 // NewContainerd creates a new containerd adapter
-func NewContainerd(cfg *ContainerdConfig, mounts *NodeMountsLookup, pathMapping PathMapping) (*Containerd, error) {
+func NewContainerd(cfg *ContainerdConfig, pathMapping PathMapping, registryFacadeHost string) (*Containerd, error) {
 	cc, err := containerd.New(cfg.SocketPath, containerd.WithDefaultNamespace(kubernetesNamespace))
 	if err != nil {
 		return nil, xerrors.Errorf("cannot connect to containerd at %s: %w", cfg.SocketPath, err)
@@ -52,13 +58,14 @@ func NewContainerd(cfg *ContainerdConfig, mounts *NodeMountsLookup, pathMapping 
 
 	res := &Containerd{
 		Client:  cc,
-		Mounts:  mounts,
 		Mapping: pathMapping,
 
 		cond:   sync.NewCond(&sync.Mutex{}),
 		cntIdx: make(map[string]*containerInfo),
 		podIdx: make(map[string]*containerInfo),
 		wsiIdx: make(map[string]*containerInfo),
+
+		registryFacadeHost: registryFacadeHost,
 	}
 	go res.start()
 
@@ -68,13 +75,14 @@ func NewContainerd(cfg *ContainerdConfig, mounts *NodeMountsLookup, pathMapping 
 // Containerd implements the ws-daemon CRI for containerd
 type Containerd struct {
 	Client  *containerd.Client
-	Mounts  *NodeMountsLookup
 	Mapping PathMapping
 
 	cond   *sync.Cond
 	podIdx map[string]*containerInfo
 	wsiIdx map[string]*containerInfo
 	cntIdx map[string]*containerInfo
+
+	registryFacadeHost string
 }
 
 type containerInfo struct {
@@ -90,6 +98,7 @@ type containerInfo struct {
 	UpperDir    string
 	CGroupPath  string
 	PID         uint32
+	ImageRef    string
 }
 
 // start listening to containerd
@@ -99,54 +108,73 @@ func (s *Containerd) start() {
 
 	reconnectionInterval := 2 * time.Second
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+		func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
 
-		cs, err := s.Client.ContainerService().List(ctx)
-		if err != nil {
-			log.WithError(err).Error("cannot list container")
-			time.Sleep(reconnectionInterval)
-			continue
-		}
-
-		// we have to loop through the containers twice because we don't know in which order
-		// the sandbox and workspace container are in. handleNewContainer expects to see the
-		// sandbox before the actual workspace. Hence, the first pass is for the sandboxes,
-		// the second pass for workspaces.
-		for _, c := range cs {
-			s.handleNewContainer(c)
-		}
-		for _, c := range cs {
-			s.handleNewContainer(c)
-		}
-
-		tsks, err := s.Client.TaskService().List(ctx, &tasks.ListTasksRequest{})
-		if err != nil {
-			log.WithError(err).Error("cannot list tasks")
-			time.Sleep(reconnectionInterval)
-			continue
-		}
-		for _, t := range tsks.Tasks {
-			s.handleNewTask(t.ID, nil, t.Pid)
-		}
-
-		evts, errchan := s.Client.Subscribe(context.Background())
-		log.Info("containerd subscription established")
-		for {
-			select {
-			case evt := <-evts:
-				ev, err := typeurl.UnmarshalAny(evt.Event)
-				if err != nil {
-					log.WithError(err).Warn("cannot unmarshal containerd event")
-					continue
-				}
-				s.handleContainerdEvent(ev)
-			case err := <-errchan:
-				log.WithError(err).Error("lost connection to containerd - will attempt to reconnect")
+			isServing, err := s.Client.IsServing(ctx)
+			if err != nil {
+				log.WithError(err).Error("cannot check if containerd is available")
 				time.Sleep(reconnectionInterval)
-				break
+				return
 			}
-		}
+
+			if !isServing {
+				err := s.Client.Reconnect()
+				if err != nil {
+					log.WithError(err).Error("cannot reconnect to containerd")
+					time.Sleep(reconnectionInterval)
+					return
+				}
+			}
+
+			cs, err := s.Client.ContainerService().List(ctx)
+			if err != nil {
+				log.WithError(err).Error("cannot list container")
+				time.Sleep(reconnectionInterval)
+				return
+			}
+
+			// we have to loop through the containers twice because we don't know in which order
+			// the sandbox and workspace container are in. handleNewContainer expects to see the
+			// sandbox before the actual workspace. Hence, the first pass is for the sandboxes,
+			// the second pass for workspaces.
+			for _, c := range cs {
+				s.handleNewContainer(c)
+			}
+			for _, c := range cs {
+				s.handleNewContainer(c)
+			}
+
+			tsks, err := s.Client.TaskService().List(ctx, &tasks.ListTasksRequest{})
+			if err != nil {
+				log.WithError(err).Error("cannot list tasks")
+				time.Sleep(reconnectionInterval)
+				return
+			}
+			for _, t := range tsks.Tasks {
+				s.handleNewTask(t.ID, nil, t.Pid)
+			}
+
+			evts, errchan := s.Client.Subscribe(context.Background())
+			log.Info("containerd subscription established")
+		LOOP:
+			for {
+				select {
+				case evt := <-evts:
+					ev, err := typeurl.UnmarshalAny(evt.Event)
+					if err != nil {
+						log.WithError(err).Warn("cannot unmarshal containerd event")
+						continue
+					}
+					s.handleContainerdEvent(ev)
+				case err := <-errchan:
+					log.WithError(err).Error("lost connection to containerd - will attempt to reconnect")
+					time.Sleep(reconnectionInterval)
+					break LOOP
+				}
+			}
+		}()
 	}
 }
 
@@ -198,12 +226,25 @@ func (s *Containerd) handleNewContainer(c containers.Container) {
 			return
 		}
 
-		info := &containerInfo{
-			InstanceID:  c.Labels[wsk8s.WorkspaceIDLabel],
-			OwnerID:     c.Labels[wsk8s.OwnerLabel],
-			WorkspaceID: c.Labels[wsk8s.MetaIDLabel],
-			PodName:     podName,
+		var info *containerInfo
+		if _, ok := c.Labels["gpwsman"]; ok {
+			// this is a ws-manager-mk1 workspace
+			info = &containerInfo{
+				InstanceID:  c.Labels[wsk8s.WorkspaceIDLabel],
+				OwnerID:     c.Labels[wsk8s.OwnerLabel],
+				WorkspaceID: c.Labels[wsk8s.MetaIDLabel],
+				PodName:     podName,
+			}
+		} else {
+			// this is a ws-manager-mk2 workspace
+			info = &containerInfo{
+				InstanceID:  c.Labels["gitpod.io/instanceID"],
+				OwnerID:     c.Labels[wsk8s.OwnerLabel],
+				WorkspaceID: c.Labels[wsk8s.WorkspaceIDLabel],
+				PodName:     podName,
+			}
 		}
+
 		if info.Snapshotter == "" {
 			// c.Snapshotter is optional
 			info.Snapshotter = "overlayfs"
@@ -242,6 +283,7 @@ func (s *Containerd) handleNewContainer(c containers.Container) {
 		info.ID = c.ID
 		info.SnapshotKey = c.SnapshotKey
 		info.Snapshotter = c.Snapshotter
+		info.ImageRef = c.Image
 
 		s.cntIdx[c.ID] = info
 		log.WithField("podname", podName).WithFields(log.OWI(info.OwnerID, info.WorkspaceID, info.InstanceID)).WithField("ID", c.ID).Debug("found workspace container - updating label cache")
@@ -268,7 +310,7 @@ func (s *Containerd) handleNewTask(cid string, rootfs []*types.Mount, pid uint32
 		mnts, err := s.Client.SnapshotService(info.Snapshotter).Mounts(ctx, info.SnapshotKey)
 		cancel()
 		if err != nil {
-			log.WithError(err).Warnf("cannot get mounts for container %v", cid)
+			log.WithError(err).WithFields(log.OWI(info.OwnerID, info.WorkspaceID, info.InstanceID)).Warnf("cannot get mounts for container %v", cid)
 		}
 		for _, m := range mnts {
 			rootfs = append(rootfs, &types.Mount{
@@ -393,6 +435,34 @@ func (s *Containerd) WaitForContainerStop(ctx context.Context, workspaceInstance
 	}
 }
 
+func (s *Containerd) DisposeContainer(ctx context.Context, workspaceInstanceID string) {
+	log := log.WithContext(ctx)
+
+	log.Debug("containerd: disposing container")
+
+	s.cond.L.Lock()
+	defer s.cond.L.Unlock()
+
+	info, ok := s.wsiIdx[workspaceInstanceID]
+	if !ok {
+		// seems we are already done here
+		log.Debug("containerd: disposing container skipped")
+		return
+	}
+	defer log.Debug("containerd: disposing container done")
+
+	if info.ID != "" {
+		err := s.Client.ContainerService().Delete(ctx, info.ID)
+		if err != nil && !errors.Is(err, errdefs.ErrNotFound) {
+			log.WithField("containerId", info.ID).WithError(err).Error("cannot delete containerd container")
+		}
+	}
+
+	delete(s.wsiIdx, info.InstanceID)
+	delete(s.podIdx, info.PodName)
+	delete(s.cntIdx, info.ID)
+}
+
 // ContainerExists finds out if a container with the given ID exists.
 func (s *Containerd) ContainerExists(ctx context.Context, id ID) (exists bool, err error) {
 	_, err = s.Client.ContainerService().Get(ctx, string(id))
@@ -408,27 +478,18 @@ func (s *Containerd) ContainerExists(ctx context.Context, id ID) (exists bool, e
 
 // ContainerRootfs finds the workspace container's rootfs.
 func (s *Containerd) ContainerRootfs(ctx context.Context, id ID, opts OptsContainerRootfs) (loc string, err error) {
-	info, ok := s.cntIdx[string(id)]
+	_, ok := s.cntIdx[string(id)]
 	if !ok {
 		return "", ErrNotFound
 	}
 
-	// TODO(cw): make this less brittle
-	// We can't get the rootfs location on the node from containerd somehow.
-	// As a workaround we'll look at the node's mount table using the snapshotter key.
-	// This feels brittle and we should keep looking for a better way.
-	mnt, err := s.Mounts.GetMountpoint(func(mountPoint string) bool {
-		return strings.Contains(mountPoint, info.SnapshotKey)
-	})
-	if err != nil {
-		return
-	}
+	rootfs := fmt.Sprintf("/run/containerd/io.containerd.runtime.v2.task/k8s.io/%v/rootfs", id)
 
 	if opts.Unmapped {
-		return mnt, nil
+		return rootfs, nil
 	}
 
-	return s.Mapping.Translate(mnt)
+	return s.Mapping.Translate(rootfs)
 }
 
 // ContainerCGroupPath finds the container's cgroup path suffix
@@ -455,18 +516,97 @@ func (s *Containerd) ContainerPID(ctx context.Context, id ID) (pid uint64, err e
 	return uint64(info.PID), nil
 }
 
-// ContainerPID returns the PID of the container's namespace root process, e.g. the container shim.
-func (s *Containerd) IsContainerdReady(ctx context.Context) (bool, error) {
-	return s.Client.IsServing(ctx)
+func (s *Containerd) GetContainerImageInfo(ctx context.Context, id ID) (*workspacev1.WorkspaceImageInfo, error) {
+	info, ok := s.cntIdx[string(id)]
+	if !ok {
+		return nil, ErrNotFound
+	}
+
+	image, err := s.Client.GetImage(ctx, info.ImageRef)
+	if err != nil {
+		return nil, err
+	}
+	size, err := image.Size(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	wsImageInfo := &workspacev1.WorkspaceImageInfo{
+		TotalSize: size,
+	}
+
+	// Fetch the manifest
+	manifest, err := images.Manifest(ctx, s.Client.ContentStore(), image.Target(), platforms.Default())
+	if err != nil {
+		log.WithError(err).WithField("image", info.ImageRef).Error("Failed to get manifest")
+		return wsImageInfo, nil
+	}
+	if manifest.Annotations != nil {
+		wsImageInfo.WorkspaceImageRef = manifest.Annotations["io.gitpod.workspace-image.ref"]
+		if size, err := strconv.Atoi(manifest.Annotations["io.gitpod.workspace-image.size"]); err == nil {
+			wsImageInfo.WorkspaceImageSize = int64(size)
+		}
+	}
+	return wsImageInfo, nil
 }
 
-var kubepodsRegexp = regexp.MustCompile(`([^/]+)-([^/]+)-pod`)
+func (s *Containerd) IsContainerdReady(ctx context.Context) (bool, error) {
+	if len(s.registryFacadeHost) == 0 {
+		return s.Client.IsServing(ctx)
+	}
+
+	// check registry facade can reach containerd and returns image not found.
+	isServing, err := s.Client.IsServing(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	if !isServing {
+		return false, nil
+	}
+
+	_, err = s.Client.GetImage(ctx, fmt.Sprintf("%v/not-a-valid-image:latest", s.registryFacadeHost))
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return true, nil
+		}
+
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func (s *Containerd) GetContainerTaskInfo(ctx context.Context, id ID) (*task.Process, error) {
+	task, err := s.Client.TaskService().Get(ctx, &tasks.GetRequest{
+		ContainerID: string(id),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if task.Process == nil {
+		return nil, fmt.Errorf("task has no process")
+	}
+	return task.Process, nil
+}
+
+func (s *Containerd) ForceKillContainerTask(ctx context.Context, id ID) error {
+	_, err := s.Client.TaskService().Kill(ctx, &tasks.KillRequest{
+		ContainerID: string(id),
+		Signal:      9,
+		All:         true,
+	})
+	return err
+}
+
+var kubepodsQoSRegexp = regexp.MustCompile(`([^/]+)-([^/]+)-pod`)
+var kubepodsRegexp = regexp.MustCompile(`([^/]+)-pod`)
 
 // ExtractCGroupPathFromContainer retrieves the CGroupPath from the linux section
 // in a container's OCI spec.
 func ExtractCGroupPathFromContainer(container containers.Container) (cgroupPath string, err error) {
 	var spec ocispecs.Spec
-	err = json.Unmarshal(container.Spec.Value, &spec)
+	err = json.Unmarshal(container.Spec.GetValue(), &spec)
 	if err != nil {
 		return
 	}
@@ -475,19 +615,30 @@ func ExtractCGroupPathFromContainer(container containers.Container) (cgroupPath 
 	}
 
 	// systemd: /kubepods.slice/kubepods-<QoS-class>.slice/kubepods-<QoS-class>-pod<pod-UID>.slice:<prefix>:<container-iD>
+	// systemd: /kubepods.slice/kubepods-pod<pod-UID>.slice:<prefix>:<container-iD>
 	// cgroupfs: /kubepods/<QoS-class>/pod<pod-UID>/<container-iD>
 	fields := strings.SplitN(spec.Linux.CgroupsPath, ":", 3)
 	if len(fields) != 3 {
+
 		return spec.Linux.CgroupsPath, nil
 	}
 
-	if match := kubepodsRegexp.FindStringSubmatch(fields[0]); len(match) == 3 {
+	if match := kubepodsQoSRegexp.FindStringSubmatch(fields[0]); len(match) == 3 {
 		root, class := match[1], match[2]
-
 		return filepath.Join(
 			"/",
 			fmt.Sprintf("%v.slice", root),
 			fmt.Sprintf("%v-%v.slice", root, class),
+			fields[0],
+			fmt.Sprintf("%v-%v.scope", fields[1], fields[2]),
+		), nil
+	}
+
+	if match := kubepodsRegexp.FindStringSubmatch(fields[0]); len(match) == 2 {
+		root := match[1]
+		return filepath.Join(
+			"/",
+			fmt.Sprintf("%v.slice", root),
 			fields[0],
 			fmt.Sprintf("%v-%v.scope", fields[1], fields[2]),
 		), nil

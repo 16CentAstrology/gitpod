@@ -23,35 +23,39 @@ export class WorkspaceClusterDBImpl implements WorkspaceClusterDB {
         return (await this.typeORM.getConnection()).manager;
     }
 
-    protected async getRepo(): Promise<Repository<DBWorkspaceCluster>> {
+    public async getRepo(): Promise<Repository<DBWorkspaceCluster>> {
         return (await this.getEntityManager()).getRepository(DBWorkspaceCluster);
     }
 
     async save(cluster: WorkspaceCluster): Promise<void> {
         const repo = await this.getRepo();
-        await repo.save(cluster);
+        await repo.save({
+            ...cluster,
+        });
     }
 
-    async deleteByName(name: string, applicationCluster: string): Promise<void> {
+    async deleteByName(name: string): Promise<void> {
         const repo = await this.getRepo();
-        await repo.update({ name, applicationCluster }, { deleted: true });
+        await repo.delete({ name });
     }
 
-    async findByName(name: string, applicationCluster: string): Promise<WorkspaceCluster | undefined> {
+    async findByName(name: string): Promise<WorkspaceCluster | undefined> {
         const repo = await this.getRepo();
-        return repo.findOne({ name, applicationCluster, deleted: false });
+        return repo.findOne({ name, deleted: false });
     }
 
     async findFiltered(predicate: WorkspaceClusterFilter): Promise<WorkspaceClusterWoTLS[]> {
         const prototype: WorkspaceClusterWoTLS = {
             name: "",
+            region: "",
             url: "",
             score: 0,
             maxScore: 0,
             state: "available",
             govern: false,
             admissionConstraints: [],
-            applicationCluster: "",
+            availableWorkspaceClasses: [],
+            preferredWorkspaceClass: "",
         };
 
         const repo = await this.getRepo();
@@ -61,9 +65,6 @@ export class WorkspaceClusterDBImpl implements WorkspaceClusterDB {
             .where("wsc.deleted = 0");
         if (predicate.name !== undefined) {
             qb = qb.andWhere("wsc.name = :name", predicate);
-        }
-        if (predicate.applicationCluster !== undefined) {
-            qb = qb.andWhere("wsc.applicationCluster = :applicationCluster", predicate);
         }
         if (predicate.state !== undefined) {
             qb = qb.andWhere("wsc.state = :state", predicate);
@@ -76,6 +77,9 @@ export class WorkspaceClusterDBImpl implements WorkspaceClusterDB {
         }
         if (predicate.url !== undefined) {
             qb = qb.andWhere("wsc.url = :url", predicate);
+        }
+        if (predicate.region !== undefined && predicate.region !== "") {
+            qb = qb.andWhere("wsc.region = :region", predicate);
         }
         return qb.getMany();
     }

@@ -5,6 +5,12 @@ Provides integrations within a Gitpod workspace.
 
 <!-- Plugin description end -->
 
+## Development before `2024.2.*` is released
+
+- You will need to copy content in build.gradle-stable.kts if you want to test stable IDEs changes. For latest, this step is the same
+- Make sure your build script `build.gradle.kts` is synced with `build.gradle-<version>.kts`
+- Other steps are the same with *Development* section
+
 ## Development
 
 The ideal setup to develop this plugin is using IntelliJ in Gitpod.
@@ -44,7 +50,7 @@ To use the script, from your gitpod's workspace:
   *********************************************************
   ```
 
-By default, the test-repository is [gitpod-io/spring-petclinic](https://github.com/gitpod-io/spring-petclinic). You can specify a different test repo using the `-r` argument, e.g:
+By default, the test-repository is [gitpod-samples/spring-petclinic](https://github.com/gitpod-samples/spring-petclinic). You can specify a different test repo using the `-r` argument, e.g:
 
 ```bash
 ./launch-dev-server.sh -r https://github.com/gitpod-io/empty

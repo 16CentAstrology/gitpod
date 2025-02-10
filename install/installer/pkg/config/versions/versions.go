@@ -16,7 +16,6 @@ type Versioned struct {
 type Components struct {
 	AgentSmith      Versioned `json:"agentSmith"`
 	Blobserve       Versioned `json:"blobserve"`
-	CAUpdater       Versioned `json:"caUpdater"`
 	ContentService  Versioned `json:"contentService"`
 	Dashboard       Versioned `json:"dashboard"`
 	DBMigrations    Versioned `json:"dbMigrations"`
@@ -25,48 +24,52 @@ type Components struct {
 	IDEProxy        Versioned `json:"ideProxy"`
 	IDEMetrics      Versioned `json:"ideMetrics"`
 	IDEService      Versioned `json:"ideService"`
-	ImageBuilder    Versioned `json:"imageBuilder"`
 	ImageBuilderMk3 struct {
 		Versioned
 		BuilderImage Versioned `json:"builderImage"`
 	} `json:"imageBuilderMk3"`
-	InstallationTelemetry Versioned `json:"installationTelemetry"`
-	IntegrationTests      Versioned `json:"integrationTests"`
-	OpenVSXProxy          Versioned `json:"openVSXProxy"`
-	PaymentEndpoint       Versioned `json:"paymentEndpoint"`
-	Proxy                 Versioned `json:"proxy"`
-	PublicAPIServer       Versioned `json:"public-api-server"`
-	RegistryFacade        Versioned `json:"registryFacade"`
-	Server                Versioned `json:"server"`
-	ServiceWaiter         Versioned `json:"serviceWaiter"`
-	ToxicConfig           Versioned `json:"toxic-config"`
-	Usage                 Versioned `json:"usage"`
-	Workspace             struct {
-		CodeImage        Versioned `json:"codeImage"`
-		DockerUp         Versioned `json:"dockerUp"`
-		Supervisor       Versioned `json:"supervisor"`
-		Workspacekit     Versioned `json:"workspacekit"`
-		DesktopIdeImages struct {
-			CodeDesktopImage                  Versioned `json:"codeDesktop"`
-			CodeDesktopImageInsiders          Versioned `json:"codeDesktopInsiders"`
-			IntelliJImage                     Versioned `json:"intellij"`
-			IntelliJLatestImage               Versioned `json:"intellijLatest"`
-			GoLandImage                       Versioned `json:"goland"`
-			GoLandLatestImage                 Versioned `json:"golandLatest"`
-			PyCharmImage                      Versioned `json:"pycharm"`
-			PyCharmLatestImage                Versioned `json:"pycharmLatest"`
-			PhpStormImage                     Versioned `json:"phpstorm"`
-			PhpStormLatestImage               Versioned `json:"phpstormLatest"`
-			RubyMineImage                     Versioned `json:"rubymine"`
-			RubyMineLatestImage               Versioned `json:"rubymineLatest"`
-			WebStormImage                     Versioned `json:"webstorm"`
-			WebStormLatestImage               Versioned `json:"webstormLatest"`
-			RiderImage                        Versioned `json:"rider"`
-			RiderLatestImage                  Versioned `json:"riderLatest"`
-			CLionImage                        Versioned `json:"clion"`
-			CLionLatestImage                  Versioned `json:"clionLatest"`
-			JetBrainsBackendPluginImage       Versioned `json:"jbBackendPlugin"`
-			JetBrainsBackendPluginLatestImage Versioned `json:"jbBackendPluginLatest"`
+	OpenVSXProxy      Versioned `json:"openVSXProxy"`
+	Proxy             Versioned `json:"proxy"`
+	PublicAPIServer   Versioned `json:"public-api-server"`
+	RefreshCredential Versioned `json:"refreshCredential"`
+	RegistryFacade    Versioned `json:"registryFacade"`
+	Server            Versioned `json:"server"`
+	ServiceWaiter     Versioned `json:"serviceWaiter"`
+	Usage             Versioned `json:"usage"`
+	Workspace         struct {
+		CodeImage             Versioned `json:"codeImage"`
+		CodeHelperImage       Versioned `json:"codeHelperImage"`
+		CodeWebExtensionImage Versioned `json:"codeWebExtensionImage"`
+		XtermWebImage         Versioned `json:"xtermWebImage"`
+		DockerUp              Versioned `json:"dockerUp"`
+		Supervisor            Versioned `json:"supervisor"`
+		Workspacekit          Versioned `json:"workspacekit"`
+		DesktopIdeImages      struct {
+			CodeDesktopImage                       Versioned `json:"codeDesktop"`
+			CodeDesktopImageInsiders               Versioned `json:"codeDesktopInsiders"`
+			IntelliJImage                          Versioned `json:"intellij"`
+			IntelliJLatestImage                    Versioned `json:"intellijLatest"`
+			GoLandImage                            Versioned `json:"goland"`
+			GoLandLatestImage                      Versioned `json:"golandLatest"`
+			PyCharmImage                           Versioned `json:"pycharm"`
+			PyCharmLatestImage                     Versioned `json:"pycharmLatest"`
+			PhpStormImage                          Versioned `json:"phpstorm"`
+			PhpStormLatestImage                    Versioned `json:"phpstormLatest"`
+			RubyMineImage                          Versioned `json:"rubymine"`
+			RubyMineLatestImage                    Versioned `json:"rubymineLatest"`
+			WebStormImage                          Versioned `json:"webstorm"`
+			WebStormLatestImage                    Versioned `json:"webstormLatest"`
+			RiderImage                             Versioned `json:"rider"`
+			RiderLatestImage                       Versioned `json:"riderLatest"`
+			CLionImage                             Versioned `json:"clion"`
+			CLionLatestImage                       Versioned `json:"clionLatest"`
+			RustRoverImage                         Versioned `json:"rustrover"`
+			RustRoverLatestImage                   Versioned `json:"rustroverLatest"`
+			JetBrainsBackendPluginImage            Versioned `json:"jbBackendPlugin"`
+			JetBrainsBackendPluginLatestImage      Versioned `json:"jbBackendPluginLatest"`
+			JetBrainsBackendPluginRiderImage       Versioned `json:"jbBackendPluginRider"`
+			JetBrainsBackendPluginLatestRiderImage Versioned `json:"jbBackendPluginLatestRider"`
+			JetBrainsLauncherImage                 Versioned `json:"jbLauncher"`
 		} `json:"desktopIdeImages"`
 	} `json:"workspace"`
 	WSDaemon struct {
@@ -74,15 +77,19 @@ type Components struct {
 
 		UserNamespaces struct {
 			SeccompProfileInstaller Versioned `json:"seccompProfileInstaller"`
-			ShiftFSModuleLoader     Versioned `json:"shiftfsModuleLoader"`
 		} `json:"userNamespaces"`
 	} `json:"wsDaemon"`
 	WSManager       Versioned `json:"wsManager"`
+	WSManagerMk2    Versioned `json:"wsManagerMk2"`
 	WSManagerBridge Versioned `json:"wsManagerBridge"`
 	WSProxy         Versioned `json:"wsProxy"`
-}
+	NodeLabeler     Versioned `json:"node-labeler"`
 
-// var embedded embed.FS
+	ImageBuilderNG Versioned `json:"imageBuilderNG"`
+	WSManagerNG    Versioned `json:"wsManagerNG"`
+	WorkspacekitNG Versioned `json:"workspacekitNG"`
+	WSDaemonNg     Versioned `json:"wsDaemonNg"`
+}
 
 func Embedded() (*Manifest, error) {
 	return loadEmbedded()

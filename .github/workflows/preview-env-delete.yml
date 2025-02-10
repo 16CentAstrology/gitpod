@@ -1,0 +1,47 @@
+name: "Preview environment delete"
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: read  # This is required for actions/checkout
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        required: true
+        description: "The name of the preview environment to delete"
+  delete:
+
+jobs:
+  create-runner:
+    uses: gitpod-io/gce-github-runner/.github/workflows/create-vm.yml@main
+    secrets:
+      runner_token: ${{ secrets.SELF_HOSTED_GITHUB_RUNNER_TOKEN }}
+      gcp_credentials: ${{ secrets.SELF_HOSTED_GITHUB_RUNNER_GCP_CREDENTIALS }}
+
+  delete:
+    if: github.event.ref_type == 'branch' || github.event.inputs.name != ''
+    runs-on: ${{ needs.create-runner.outputs.label }}
+    needs: [create-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Environment
+        uses: ./.github/actions/setup-environment
+        with:
+          identity_provider: ${{ secrets.DEV_PREVIEW_PROVIDER }}
+          service_account: ${{ secrets.DEV_PREVIEW_SA }}
+          leeway_segment_key: ${{ secrets.LEEWAY_SEGMENT_KEY }}
+      - name: Delete preview environment
+        uses: ./.github/actions/delete-preview
+        with:
+          name: ${{ github.event.inputs.name || github.event.ref}}
+
+  delete-runner:
+    if: always()
+    needs:
+      - create-runner
+      - delete
+    uses: gitpod-io/gce-github-runner/.github/workflows/delete-vm.yml@main
+    secrets:
+      gcp_credentials: ${{ secrets.SELF_HOSTED_GITHUB_RUNNER_GCP_CREDENTIALS }}
+    with:
+      runner-label: ${{ needs.create-runner.outputs.label }}
+      machine-zone: ${{ needs.create-runner.outputs.machine-zone }}

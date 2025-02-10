@@ -16,10 +16,13 @@
 	order gitpod.workspace_download before redir
 	order gitpod.headless_log_download before rewrite
 	order gitpod.configcat before rewrite
+	order gitpod.analytics before rewrite
 	order gitpod.sec_websocket_key before header
+	order gitpod.frontend_dev after forward_auth
 
 	servers {
 		protocols h1 h2 h2c
+		metrics
 	}
 }
 
@@ -88,10 +91,6 @@
 	}
 }
 
-(upstream_headers) {
-	header_up X-Real-IP {http.request.remote.host}
-}
-
 (upstream_connection) {
 	lb_try_duration 1s
 }
@@ -128,13 +127,11 @@
 	}
 }
 
-(slow_fast_matchers) {
-	@slow {
-		header X-Gitpod-Slow-Database "true"
-	}
+(server_public_api) {
+	import compression
 
-	@fast {
-		not header X-Gitpod-Slow-Database "true"
+	reverse_proxy server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3001 {
+		import upstream_connection
 	}
 }
 
@@ -146,8 +143,23 @@
 
 # TODO: refactor once we can listen only in localhost
 :9545 {
+
 	metrics /metrics {
 		disable_openmetrics
+	}
+}
+
+# Internal analytics endpoint
+:9546 {
+	handle /analytics* {
+		gitpod.analytics
+	}
+}
+
+# Internal configcat endpoint
+:9547 {
+	handle /configcat* {
+		gitpod.configcat
 	}
 }
 
@@ -162,6 +174,19 @@ api.{$GITPOD_DOMAIN} {
 		allowed_origins https://{$GITPOD_DOMAIN}
 	}
 
+	@to_server path /auth/*/callback
+	handle @to_server {
+		import compression
+
+		reverse_proxy server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
+			import upstream_connection
+		}
+	}
+
+	handle /gitpod.v1.* {
+		import server_public_api
+	}
+
 	reverse_proxy public-api-server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:9002
 }
 
@@ -170,11 +195,54 @@ http:// {
 	redir https://{host}{uri} permanent
 }
 
+# The services directly correlate to Public Services exposed by Dedicated
+# When adding new endpoints, please notify Team Engine
+https://services.{$GITPOD_DOMAIN} {
+	import enable_log
+	import remove_server_header
+	import ssl_configuration
+	import security_headers
+
+	handle /idp/* {
+		reverse_proxy public-api-server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:9002
+	}
+
+	handle /apps/* {
+		reverse_proxy server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000
+	}
+}
+
 https://{$GITPOD_DOMAIN} {
 	import enable_log
 	import remove_server_header
 	import ssl_configuration
 	import security_headers
+
+	# Make it possible to get an exposed healthcheck, for example for HTTP(s) NLBs
+	handle /api/health {
+		respond 200
+	}
+
+	@proxy_server_public_api path /public-api/gitpod.experimental.v1.HelloService*
+	handle @proxy_server_public_api {
+		uri strip_prefix /public-api
+
+		import server_public_api
+	}
+
+	@proxy_server_public_api_2 path /public-api/gitpod.v1.*
+	handle @proxy_server_public_api_2 {
+		uri strip_prefix /public-api
+
+		import server_public_api
+	}
+
+	@proxy_public_api path /public-api*
+	handle @proxy_public_api {
+		uri strip_prefix /public-api
+
+		reverse_proxy public-api-server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:9002
+	}
 
 	@workspace_download path /workspace-download*
 	handle @workspace_download {
@@ -214,6 +282,23 @@ https://{$GITPOD_DOMAIN} {
 		gitpod.configcat
 	}
 
+	@analytics path /analytics*
+	handle @analytics {
+		gitpod.cors_origin {
+			any_domain true
+		}
+		gitpod.analytics
+	}
+
+	@browser_analytics path /_analytics*
+	handle @browser_analytics {
+		import compression
+
+		reverse_proxy server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
+			import upstream_connection
+		}
+	}
+
 	@backend_wss {
 		path /api/gitpod /api/v1
 	}
@@ -224,59 +309,40 @@ https://{$GITPOD_DOMAIN} {
 
 		gitpod.sec_websocket_key
 
-		forward_auth server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
-			uri /feature-flags/slow-database
-
-			header_up -Connection
-			header_up -Upgrade
-
-			copy_headers X-Gitpod-Slow-Database
-		}
-
-		import slow_fast_matchers
-
 		uri strip_prefix /api
 
-		reverse_proxy @fast server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
-			import upstream_headers
-			import upstream_connection
-		}
-
-		reverse_proxy @slow slow-server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
-			import upstream_headers
+		reverse_proxy server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
 			import upstream_connection
 		}
 	}
 
-	@backend path /api/* /headless-logs/*
+	@backend path /api/* /headless-logs/* /prebuild-logs/*
 	handle @backend {
 		gitpod.cors_origin {
 			base_domain {$GITPOD_DOMAIN}
 		}
 
-		forward_auth server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
-			uri /feature-flags/slow-database
-			copy_headers X-Gitpod-Slow-Database
-		}
-
-		import slow_fast_matchers
-
 		uri strip_prefix /api
 
-		reverse_proxy @fast server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
-			import upstream_headers
+		reverse_proxy server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
 			import upstream_connection
 
 			# required for smooth streaming of terminal logs
 			flush_interval -1
 		}
+	}
 
-		reverse_proxy @slow slow-server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
-			import upstream_headers
+	@iam path /iam/*
+	handle @iam {
+
+		gitpod.cors_origin {
+			any_domain true
+		}
+
+		uri strip_prefix /iam
+
+		reverse_proxy public-api-server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:9002 {
 			import upstream_connection
-
-			# required for smooth streaming of terminal logs
-			flush_interval -1
 		}
 	}
 
@@ -289,21 +355,19 @@ https://{$GITPOD_DOMAIN} {
 		import compression
 
 		reverse_proxy server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
-			import upstream_headers
 			import upstream_connection
 
 			flush_interval -1
 		}
 	}
 
-	@local_app {
-		path /static/bin/gitpod-local-companion-*
+	@ide_bin {
+		path /static/bin/*
 	}
-	handle @local_app {
+	handle @ide_bin {
 		import compression
 
 		reverse_proxy ide-proxy.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:80 {
-			import upstream_headers
 			import upstream_connection
 		}
 	}
@@ -312,27 +376,32 @@ https://{$GITPOD_DOMAIN} {
 	handle @to_server {
 		import compression
 
-		forward_auth server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
-			uri /feature-flags/slow-database
-			copy_headers X-Gitpod-Slow-Database
-		}
-
-		import slow_fast_matchers
-
-		reverse_proxy @fast server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
-			import upstream_headers
-			import upstream_connection
-		}
-
-		reverse_proxy @slow slow-server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
-			import upstream_headers
+		reverse_proxy server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
 			import upstream_connection
 		}
 	}
 
+	# Default: route to dashboard
 	handle {
+		# Dev URL header present?
+		@frontend_dev {
+			header X-Frontend-Dev-URL *
+		}
+		handle @frontend_dev {
+			# ...and allowed to use it?
+			forward_auth server.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3000 {
+				uri /auth/frontend-dev
+
+				header_up -Connection
+				header_up -Upgrade
+			}
+			# Then handle it with our plugin!
+			gitpod.frontend_dev {
+				upstream http://dashboard.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3001
+			}
+		}
+
 		reverse_proxy dashboard.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:3001 {
-			import upstream_headers
 			import upstream_connection
 		}
 	}
@@ -355,45 +424,10 @@ https://*.*.{$GITPOD_DOMAIN} {
 	import ssl_configuration
 	import debug_headers
 
-	# foreign content route used by vscode to serve webview and webworker resources of the form
-	# https://{{hash_base_32}}.<cluster>.<gitpod_domain> or https://v--{{hash_base_32}}.<cluster>.<gitpod_domain>
-	# e.g:
-	# https://0d9rkrj560blqb5s07q431ru9mhg19k1k4bqgd1dbprtgmt7vuhk.ws-us34xl.gitpod.io (for webviews)
-	# https://v--0d9rkrj560blqb5s07q431ru9mhg19k1k4bqgd1dbprtgmt7vuhk.ws-us34xl.gitpod.io (for webworker)
-	@foreign_content2 header_regexp host Host ^(?:v--)?[0-9a-v]+.ws(-[a-z0-9]+)?.{$GITPOD_DOMAIN}
-	handle @foreign_content2 {
-		reverse_proxy https://ws-proxy.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:9090 {
-			import workspace_transport
-			import upstream_headers
-
-			header_up X-WSProxy-Host {http.request.host}
-		}
-	}
-
-	@workspace_port header_regexp host Host ^(?P<workspacePort>[0-9]{2,5})-(?P<workspaceID>[a-z0-9][0-9a-z\-]+).ws(?P<location>-[a-z0-9]+)?.{$GITPOD_DOMAIN}
-	handle @workspace_port {
-		reverse_proxy https://ws-proxy.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:9090 {
-			import workspace_transport
-			import upstream_headers
-
-			header_up X-Gitpod-WorkspaceId {re.host.workspaceID}
-			header_up X-Gitpod-Port {re.host.workspacePort}
-			header_up X-WSProxy-Host {http.request.host}
-		}
-	}
-
-	@workspace header_regexp host Host ^(?P<workspaceID>[a-z0-9][0-9a-z\-]+).ws(?P<location>-[a-z0-9]+)?.{$GITPOD_DOMAIN}
-	handle @workspace {
-		reverse_proxy https://ws-proxy.{$KUBE_NAMESPACE}.{$KUBE_DOMAIN}:9090 {
-			import workspace_transport
-			import upstream_headers
-
-			header_up X-Gitpod-WorkspaceId {re.host.workspaceID}
-			header_up X-WSProxy-Host {http.request.host}
-		}
-	}
-
-	respond "Not found" 404
+	# Dear future reader: If you wonder about the asterisk in the line below: So do I!
+	# But as of now (caddy 2.6.2) it's the only way to make caddy import a file.
+	import /etc/caddy/workspace-handler/*.{$WORKSPACE_HANDLER_FILE}
 }
+
 
 import /etc/caddy/vhosts/vhost.*

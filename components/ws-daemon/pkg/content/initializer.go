@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/opencontainers/runc/libcontainer/specconv"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opentracing/opentracing-go"
 	"github.com/sirupsen/logrus"
@@ -31,6 +30,7 @@ import (
 	"github.com/gitpod-io/gitpod/content-service/pkg/archive"
 	wsinit "github.com/gitpod-io/gitpod/content-service/pkg/initializer"
 	"github.com/gitpod-io/gitpod/content-service/pkg/storage"
+	"github.com/gitpod-io/gitpod/ws-daemon/pkg/libcontainer/specconv"
 )
 
 // RunInitializerOpts configure RunInitializer
@@ -64,7 +64,7 @@ var (
 	errCannotFindSnapshot = errors.New("cannot find snapshot")
 )
 
-func collectRemoteContent(ctx context.Context, rs storage.DirectAccess, ps storage.PresignedAccess, workspaceOwner string, initializer *csapi.WorkspaceInitializer) (rc map[string]storage.DownloadInfo, err error) {
+func CollectRemoteContent(ctx context.Context, rs storage.DirectAccess, ps storage.PresignedAccess, workspaceOwner string, initializer *csapi.WorkspaceInitializer) (rc map[string]storage.DownloadInfo, err error) {
 	rc = make(map[string]storage.DownloadInfo)
 
 	backup, err := ps.SignDownload(ctx, rs.Bucket(workspaceOwner), rs.BackupObject(storage.DefaultBackup), &storage.SignedURLOptions{})
@@ -285,7 +285,7 @@ func RunInitializer(ctx context.Context, destination string, initializer *csapi.
 		if exiterr, ok := err.(*exec.ExitError); ok {
 			// The program has exited with an exit code != 0. If it's FAIL_CONTENT_INITIALIZER_EXIT_CODE, it was deliberate.
 			if status, ok := exiterr.Sys().(syscall.WaitStatus); ok && status.ExitStatus() == FAIL_CONTENT_INITIALIZER_EXIT_CODE {
-				log.WithError(err).WithField("exitCode", status.ExitStatus()).WithField("args", args).Error("content init failed")
+				log.WithError(err).WithFields(opts.OWI.Fields()).WithField("errmsgsize", len(errmsg)).WithField("exitCode", status.ExitStatus()).WithField("args", args).Error("content init failed")
 				return xerrors.Errorf(string(errmsg))
 			}
 		}
@@ -406,12 +406,15 @@ func (rs *remoteContentStorage) Download(ctx context.Context, destination string
 		"-o", tempFile.Name(),
 	}
 
+	downloadStart := time.Now()
 	cmd := exec.Command("aria2c", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.WithError(err).WithField("out", string(out)).Error("unexpected error downloading file")
 		return true, xerrors.Errorf("unexpected error downloading file")
 	}
+	downloadDuration := time.Since(downloadStart)
+	log.WithField("downloadDuration", downloadDuration.String()).Info("aria2c download duration")
 
 	tempFile, err = os.Open(tempFile.Name())
 	if err != nil {
@@ -421,10 +424,13 @@ func (rs *remoteContentStorage) Download(ctx context.Context, destination string
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 
+	extractStart := time.Now()
 	err = archive.ExtractTarbal(ctx, tempFile, destination, archive.WithUIDMapping(mappings), archive.WithGIDMapping(mappings))
 	if err != nil {
 		return true, xerrors.Errorf("tar %s: %s", destination, err.Error())
 	}
+	extractDuration := time.Since(extractStart)
+	log.WithField("extractDuration", extractDuration.String()).Info("extract tarbal duration")
 
 	return true, nil
 }

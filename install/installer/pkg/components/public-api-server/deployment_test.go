@@ -57,6 +57,24 @@ func TestDeployment_ServerArguments(t *testing.T) {
 			},
 		},
 		{
+			Name: "database-config",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: "gcp-db-creds-service-account-name",
+				},
+			},
+		},
+		{
+			Name: "ca-certificates",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: "gitpod-ca-bundle",
+					},
+				},
+			},
+		},
+		{
 			Name: "stripe-secret",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
@@ -74,5 +92,13 @@ func TestDeployment_ServerArguments(t *testing.T) {
 				},
 			},
 		},
-	}, dpl.Spec.Template.Spec.Volumes, "must bind config as a volume")
+		{
+			Name: "auth-pki-signing",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: "auth-pki",
+				},
+			},
+		},
+	}, dpl.Spec.Template.Spec.Volumes, "must bind volumes")
 }

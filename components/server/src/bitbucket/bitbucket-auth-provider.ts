@@ -7,11 +7,11 @@
 import { AuthProviderInfo } from "@gitpod/gitpod-protocol";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { Bitbucket } from "bitbucket";
-import * as express from "express";
+import express from "express";
 import { injectable } from "inversify";
 import { AuthUserSetup } from "../auth/auth-provider";
 import { GenericAuthProvider } from "../auth/generic-auth-provider";
-import { BitbucketOAuthScopes } from "./bitbucket-oauth-scopes";
+import { BitbucketOAuthScopes } from "@gitpod/public-api-common/lib/auth-providers";
 
 @injectable()
 export class BitbucketAuthProvider extends GenericAuthProvider {
@@ -47,15 +47,21 @@ export class BitbucketAuthProvider extends GenericAuthProvider {
         return "x-token-auth";
     }
 
-    authorize(req: express.Request, res: express.Response, next: express.NextFunction, scope?: string[]): void {
-        super.authorize(req, res, next, scope ? scope : BitbucketOAuthScopes.Requirements.DEFAULT);
+    authorize(
+        req: express.Request,
+        res: express.Response,
+        next: express.NextFunction,
+        state: string,
+        scope?: string[],
+    ) {
+        super.authorize(req, res, next, state, scope ? scope : BitbucketOAuthScopes.Requirements.DEFAULT);
     }
 
     protected get baseURL() {
         return `https://${this.params.host}`;
     }
 
-    protected readAuthUserSetup = async (accessToken: string, _tokenResponse: object) => {
+    protected async readAuthUserSetup(accessToken: string, _tokenResponse: object) {
         try {
             const options = {
                 notice: false,
@@ -71,6 +77,7 @@ export class BitbucketAuthProvider extends GenericAuthProvider {
             const primaryEmail = emails.values.find((x: { is_primary: boolean; email: string }) => x.is_primary).email;
 
             const currentScopes = this.normalizeScopes(
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
                 (headers as any)["x-oauth-scopes"].split(",").map((s: string) => s.trim()),
             );
 
@@ -89,18 +96,22 @@ export class BitbucketAuthProvider extends GenericAuthProvider {
             log.error(`(${this.strategyName}) Reading current user info failed`, error, { error });
             throw error;
         }
-    };
+    }
 
     protected normalizeScopes(scopes: string[]) {
         const set = new Set(scopes);
-        if (set.has("issue:write")) {
-            set.add("repository:write");
+        if (set.has(BitbucketOAuthScopes.REPOSITORY_WRITE)) {
+            set.add(BitbucketOAuthScopes.REPOSITORY_READ);
         }
-        if (set.has("repository:write")) {
-            set.add("repository");
+        if (set.has(BitbucketOAuthScopes.PULL_REQUEST_READ)) {
+            // https://developer.atlassian.com/cloud/bitbucket/bitbucket-cloud-rest-api-scopes/#pullrequest
+            set.add(BitbucketOAuthScopes.REPOSITORY_READ);
         }
-        if (set.has("pullrequest:write")) {
-            set.add("pullrequest");
+        if (set.has(BitbucketOAuthScopes.PULL_REQUEST_WRITE)) {
+            // https://developer.atlassian.com/cloud/bitbucket/bitbucket-cloud-rest-api-scopes/#pullrequest-write
+            set.add(BitbucketOAuthScopes.REPOSITORY_WRITE);
+            set.add(BitbucketOAuthScopes.REPOSITORY_READ);
+            set.add(BitbucketOAuthScopes.PULL_REQUEST_READ);
         }
         for (const item of set.values()) {
             if (!BitbucketOAuthScopes.Requirements.DEFAULT.includes(item)) {

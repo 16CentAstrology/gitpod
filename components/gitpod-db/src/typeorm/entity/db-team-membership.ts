@@ -6,7 +6,6 @@
 
 import { TeamMemberRole } from "@gitpod/gitpod-protocol";
 import { Entity, Column, PrimaryColumn, Index } from "typeorm";
-import { Transformer } from "../transformer";
 import { TypeORM } from "../typeorm";
 
 @Entity()
@@ -28,15 +27,4 @@ export class DBTeamMembership {
 
     @Column("varchar")
     creationTime: string;
-
-    @Column({
-        ...TypeORM.UUID_COLUMN_TYPE,
-        default: "",
-        transformer: Transformer.MAP_EMPTY_STR_TO_UNDEFINED,
-    })
-    subscriptionId?: string;
-
-    // This column triggers the db-sync deletion mechanism. It's not intended for public consumption.
-    @Column()
-    deleted: boolean;
 }

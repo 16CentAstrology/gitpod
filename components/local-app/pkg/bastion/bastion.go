@@ -208,7 +208,7 @@ type Bastion struct {
 }
 
 func (b *Bastion) Run() error {
-	updates, err := b.Client.InstanceUpdates(b.ctx, "")
+	updates, err := b.Client.WorkspaceUpdates(b.ctx, "")
 	if err != nil {
 		return err
 	}
@@ -760,6 +760,9 @@ func (b *Bastion) tunnelPorts(ws *Workspace) {
 }
 
 func (b *Bastion) doTunnelPorts(ctx context.Context, ws *Workspace) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	statusService := supervisor.NewStatusServiceClient(ws.supervisorClient)
 	status, err := statusService.PortsStatus(ctx, &supervisor.PortsStatusRequest{
 		Observe: true,

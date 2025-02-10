@@ -9,7 +9,7 @@ import { inject, injectable } from "inversify";
 import { AuthProviderParams } from "../auth/auth-provider";
 import { UnauthorizedError } from "../errors";
 import { TokenProvider } from "../user/token-provider";
-import { BitbucketServerOAuthScopes } from "./bitbucket-server-oauth-scopes";
+import { BitbucketServerOAuthScopes } from "@gitpod/public-api-common/lib/auth-providers";
 
 @injectable()
 export class BitbucketServerTokenHelper {
@@ -30,7 +30,7 @@ export class BitbucketServerTokenHelper {
         const { host } = this.config;
         try {
             const token = await this.tokenProvider.getTokenForHost(user, host);
-            if (this.containsScopes(token, requiredScopes)) {
+            if (token && this.containsScopes(token, requiredScopes)) {
                 return token;
             }
         } catch {
@@ -39,7 +39,13 @@ export class BitbucketServerTokenHelper {
         if (requiredScopes.length === 0) {
             requiredScopes = BitbucketServerOAuthScopes.Requirements.DEFAULT;
         }
-        throw UnauthorizedError.create(host, requiredScopes, "missing-identity");
+        throw UnauthorizedError.create({
+            host,
+            providerType: "BitbucketServer",
+            requiredScopes: BitbucketServerOAuthScopes.Requirements.DEFAULT,
+            providerIsConnected: false,
+            isMissingScopes: true,
+        });
     }
     protected containsScopes(token: Token, wantedScopes: string[] | undefined): boolean {
         const set = new Set(wantedScopes);

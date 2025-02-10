@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
 	configv1 "github.com/gitpod-io/gitpod/installer/pkg/config/v1"
 	"github.com/spf13/cobra"
@@ -26,6 +26,8 @@ type mirrorListRepo struct {
 var mirrorListOpts struct {
 	ConfigFN          string
 	ExcludeThirdParty bool
+	Repository        string
+	Domain            string
 }
 
 // mirrorListCmd represents the mirror list command
@@ -63,6 +65,14 @@ image to the "target" repo`,
 			return err
 		}
 
+		if mirrorListOpts.Repository != "" {
+			cfg.Repository = mirrorListOpts.Repository
+		}
+
+		if mirrorListOpts.Domain != "" {
+			cfg.Domain = mirrorListOpts.Domain
+		}
+
 		images, err := generateMirrorList(cfgVersion, cfg)
 		if err != nil {
 			return err
@@ -84,6 +94,8 @@ func init() {
 
 	mirrorListCmd.Flags().BoolVar(&mirrorListOpts.ExcludeThirdParty, "exclude-third-party", false, "exclude non-Gitpod images")
 	mirrorListCmd.Flags().StringVarP(&mirrorListOpts.ConfigFN, "config", "c", os.Getenv("GITPOD_INSTALLER_CONFIG"), "path to the config file")
+	mirrorListCmd.Flags().StringVar(&mirrorListOpts.Repository, "repository", "", "overwrite the registry in the config")
+	mirrorListCmd.Flags().StringVar(&mirrorListOpts.Domain, "domain", "", "overwrite the domain in the config")
 }
 
 func renderAllKubernetesObject(cfgVersion string, cfg *configv1.Config) ([]string, error) {
@@ -107,7 +119,7 @@ func renderAllKubernetesObject(cfgVersion string, cfg *configv1.Config) ([]strin
 				InCluster: pointer.Bool(false),
 				External: &configv1.ContainerRegistryExternal{
 					URL: "some-url",
-					Certificate: configv1.ObjectRef{
+					Certificate: &configv1.ObjectRef{
 						Kind: configv1.ObjectRefSecret,
 						Name: "value",
 					},
@@ -116,7 +128,7 @@ func renderAllKubernetesObject(cfgVersion string, cfg *configv1.Config) ([]strin
 					Bucket:   "some-bucket",
 					Region:   "some-region",
 					Endpoint: "some-url",
-					Certificate: configv1.ObjectRef{
+					Certificate: &configv1.ObjectRef{
 						Kind: configv1.ObjectRefSecret,
 						Name: "value",
 					},
@@ -127,37 +139,12 @@ func renderAllKubernetesObject(cfgVersion string, cfg *configv1.Config) ([]strin
 				S3: &configv1.ObjectStorageS3{
 					Endpoint:   "endpoint",
 					BucketName: "some-bucket",
-					Credentials: configv1.ObjectRef{
+					Credentials: &configv1.ObjectRef{
 						Kind: configv1.ObjectRefSecret,
 						Name: "value",
 					},
 				},
 			}
-			return renderKubernetesObjects(cfgVersion, cfg)
-		},
-		func() ([]string, error) {
-			// Render for external depedencies - Azure
-			cfg.Database.CloudSQL = nil
-			cfg.ContainerRegistry = configv1.ContainerRegistry{
-				InCluster: pointer.Bool(false),
-				External: &configv1.ContainerRegistryExternal{
-					URL: "some-url",
-					Certificate: configv1.ObjectRef{
-						Kind: configv1.ObjectRefSecret,
-						Name: "value",
-					},
-				},
-			}
-			cfg.ObjectStorage = configv1.ObjectStorage{
-				InCluster: pointer.Bool(false),
-				Azure: &configv1.ObjectStorageAzure{
-					Credentials: configv1.ObjectRef{
-						Kind: configv1.ObjectRefSecret,
-						Name: "value",
-					},
-				},
-			}
-
 			return renderKubernetesObjects(cfgVersion, cfg)
 		},
 		func() ([]string, error) {
@@ -236,6 +223,10 @@ func generateMirrorList(cfgVersion string, cfg *configv1.Config) ([]mirrorListRe
 	for _, img := range rawImages {
 		// Ignore if the image equals the container registry
 		if img == common.GitpodContainerRegistry {
+			continue
+		}
+		// Ignore empty image
+		if img == "" {
 			continue
 		}
 		// Dedupe

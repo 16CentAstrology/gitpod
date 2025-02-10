@@ -4,27 +4,24 @@
 
 package experiments
 
-import "context"
-
-const (
-	PersonalAccessTokensEnabledFlag                = "personalAccessTokensEnabled"
-	OIDCServiceEnabledFlag                         = "oidcServiceEnabled"
-	SupervisorPersistServerAPIChannelWhenStartFlag = "supervisor_persist_serverapi_channel_when_start"
-	SupervisorUsePublicAPIFlag                     = "supervisor_experimental_publicapi"
+import (
+	"context"
+	"strings"
 )
 
-func IsPersonalAccessTokensEnabled(ctx context.Context, client Client, attributes Attributes) bool {
-	return client.GetBoolValue(ctx, PersonalAccessTokensEnabledFlag, false, attributes)
+const (
+	OIDCServiceEnabledFlag = "oidcServiceEnabled"
+	IdPClaimKeysFlag       = "idp_claim_keys"
+)
+
+func GetIdPClaimKeys(ctx context.Context, client Client, attributes Attributes) []string {
+	value := client.GetStringValue(ctx, IdPClaimKeysFlag, "undefined", attributes)
+	if value == "" || value == "undefined" {
+		return []string{}
+	}
+	return strings.Split(value, ",")
 }
 
 func IsOIDCServiceEnabled(ctx context.Context, client Client, attributes Attributes) bool {
 	return client.GetBoolValue(ctx, OIDCServiceEnabledFlag, false, attributes)
-}
-
-func SupervisorPersistServerAPIChannelWhenStart(ctx context.Context, client Client, attributes Attributes) bool {
-	return client.GetBoolValue(ctx, SupervisorPersistServerAPIChannelWhenStartFlag, true, attributes)
-}
-
-func SupervisorUsePublicAPI(ctx context.Context, client Client, attributes Attributes) bool {
-	return client.GetBoolValue(ctx, SupervisorUsePublicAPIFlag, false, attributes)
 }

@@ -4,29 +4,43 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { useEffect } from "react";
-import Separator from "./Separator";
+import { useLocation } from "react-router";
+import { useDocumentTitle } from "../hooks/use-document-title";
+import { Separator } from "./Separator";
+import TabMenuItem from "./TabMenuItem";
+import { PageHeading } from "@podkit/layout/PageHeading";
 
 export interface HeaderProps {
-    title: string | React.ReactElement;
+    title: string;
     subtitle: string | React.ReactElement;
+    tabs?: TabEntry[];
+}
+
+export interface TabEntry {
+    title: string;
+    link: string;
+    alternatives?: string[];
 }
 
 export default function Header(p: HeaderProps) {
-    useEffect(() => {
-        if (typeof p.title !== "string") {
-            return;
-        }
-        document.title = `${p.title} — Gitpod`;
-    }, []);
+    const location = useLocation();
+    useDocumentTitle(`${p.title}`);
     return (
         <div className="app-container border-gray-200 dark:border-gray-800">
-            <div className="flex pb-8 pt-6">
-                <div className="">
-                    {typeof p.title === "string" ? <h1 className="tracking-tight">{p.title}</h1> : p.title}
-                    {typeof p.subtitle === "string" ? <h2 className="tracking-wide">{p.subtitle}</h2> : p.subtitle}
-                </div>
-            </div>
+            <PageHeading title={p.title} subtitle={p.subtitle} />
+
+            <nav className="flex">
+                {p.tabs?.map((entry) => (
+                    <TabMenuItem
+                        key={entry.title}
+                        name={entry.title}
+                        selected={[entry.link, ...(entry.alternatives || [])].some(
+                            (l) => location.pathname.toLowerCase() === l.toLowerCase(),
+                        )}
+                        link={entry.link}
+                    />
+                ))}
+            </nav>
             <Separator />
         </div>
     );

@@ -5,9 +5,9 @@
  */
 
 import { Repository, User } from "@gitpod/gitpod-protocol";
-import { skipIfEnvVarNotSet } from "@gitpod/gitpod-protocol/lib/util/skip-if";
+import { ifEnvVarNotSet } from "@gitpod/gitpod-protocol/lib/util/skip-if";
 import { Container, ContainerModule } from "inversify";
-import { retries, suite, test, timeout } from "mocha-typescript";
+import { retries, skip, suite, test, timeout } from "@testdeck/mocha";
 import { expect } from "chai";
 import { GitpodHostUrl } from "@gitpod/gitpod-protocol/lib/util/gitpod-host-url";
 import { BitbucketServerFileProvider } from "./bitbucket-server-file-provider";
@@ -20,7 +20,7 @@ import { TokenProvider } from "../user/token-provider";
 import { BitbucketServerApi } from "./bitbucket-server-api";
 import { HostContextProvider } from "../auth/host-context-provider";
 
-@suite(timeout(10000), retries(1), skipIfEnvVarNotSet("GITPOD_TEST_TOKEN_BITBUCKET_SERVER"))
+@suite(timeout(10000), retries(1), skip(ifEnvVarNotSet("GITPOD_TEST_TOKEN_BITBUCKET_SERVER")))
 class TestBitbucketServerFileProvider {
     protected service: BitbucketServerFileProvider;
     protected user: User;
@@ -31,7 +31,7 @@ class TestBitbucketServerFileProvider {
         verified: true,
         description: "",
         icon: "",
-        host: "bitbucket.gitpod-self-hosted.com",
+        host: "bitbucket.gitpod-dev.com",
         oauth: {
             callBackUrl: "",
             clientId: "not-used",
@@ -45,16 +45,17 @@ class TestBitbucketServerFileProvider {
     public before() {
         const container = new Container();
         container.load(
-            new ContainerModule((bind, unbind, isBound, rebind) => {
+            new ContainerModule((bind) => {
                 bind(BitbucketServerFileProvider).toSelf().inSingletonScope();
                 bind(BitbucketServerContextParser).toSelf().inSingletonScope();
                 bind(AuthProviderParams).toConstantValue(TestBitbucketServerFileProvider.AUTH_HOST_CONFIG);
                 bind(BitbucketServerTokenHelper).toSelf().inSingletonScope();
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
                 bind(TokenService).toConstantValue({
                     createGitpodToken: async () => ({ token: { value: "foobar123-token" } }),
                 } as any);
                 bind(Config).toConstantValue({
-                    hostUrl: new GitpodHostUrl(),
+                    hostUrl: new GitpodHostUrl("https://gitpod.io"),
                 });
                 bind(TokenProvider).toConstantValue(<TokenProvider>{
                     getTokenForHost: async () => {
@@ -63,7 +64,6 @@ class TestBitbucketServerFileProvider {
                             scopes: [],
                         };
                     },
-                    getFreshPortAuthenticationToken: undefined as any,
                 });
                 bind(BitbucketServerApi).toSelf().inSingletonScope();
                 bind(HostContextProvider).toConstantValue({
@@ -91,14 +91,15 @@ class TestBitbucketServerFileProvider {
 
     @test async test_getGitpodFileContent_ok() {
         const result = await this.service.getGitpodFileContent(
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
             {
-                revision: "master",
+                revision: "main",
                 repository: <Repository>{
-                    cloneUrl: "https://bitbucket.gitpod-self-hosted.com/projects/FOO/repos/repo123",
-                    webUrl: "https://bitbucket.gitpod-self-hosted.com/projects/FOO/repos/repo123",
-                    name: "repo123",
-                    repoKind: "projects",
-                    owner: "FOO",
+                    cloneUrl: "https://bitbucket.gitpod-dev.com/users/filip/repos/spring-petclinic",
+                    webUrl: "https://bitbucket.gitpod-dev.com/users/filip/repos/spring-petclinic",
+                    name: "spring-petclinic",
+                    repoKind: "users",
+                    owner: "filip",
                 },
             } as any,
             this.user,
@@ -110,19 +111,43 @@ class TestBitbucketServerFileProvider {
     @test async test_getLastChangeRevision_ok() {
         const result = await this.service.getLastChangeRevision(
             {
-                owner: "FOO",
-                name: "repo123",
-                repoKind: "projects",
-                revision: "foo",
-                host: "bitbucket.gitpod-self-hosted.com",
-                cloneUrl: "https://bitbucket.gitpod-self-hosted.com/projects/FOO/repos/repo123",
-                webUrl: "https://bitbucket.gitpod-self-hosted.com/projects/FOO/repos/repo123",
+                owner: "filip",
+                name: "spring-petclinic",
+                repoKind: "users",
+                revision: "ft/invalid-docker",
+                host: "bitbucket.gitpod-dev.com",
+                cloneUrl: "https://bitbucket.gitpod-dev.com/users/filip/repos/spring-petclinic",
+                webUrl: "https://bitbucket.gitpod-dev.com/users/filip/repos/spring-petclinic",
             } as Repository,
-            "foo",
+            "ft/invalid-docker",
             this.user,
-            "folder/sub/test.txt",
+            ".gitpod.yml",
         );
-        expect(result).to.equal("1384b6842d73b8705feaf45f3e8aa41f00529042");
+        expect(result).to.equal("7e38d77cc599682f543f71da36328307e35caa94");
+    }
+
+    @test async test_getLastChangeRevision_not_found() {
+        // it looks like expecting a promise to throw doesn't work, so we hack it with a try-catch
+        let didThrow = false;
+        try {
+            await this.service.getLastChangeRevision(
+                {
+                    owner: "filip",
+                    name: "spring-petclinic",
+                    repoKind: "users",
+                    revision: "ft/invalid-docker",
+                    host: "bitbucket.gitpod-dev.com",
+                    cloneUrl: "https://bitbucket.gitpod-dev.com/users/filip/repos/spring-petclinic",
+                    webUrl: "https://bitbucket.gitpod-dev.com/users/filip/repos/spring-petclinic",
+                } as Repository,
+                "ft/invalid-docker",
+                this.user,
+                "gitpod.Dockerfile",
+            );
+        } catch (err) {
+            didThrow = true;
+        }
+        expect(didThrow).to.be.true;
     }
 }
 

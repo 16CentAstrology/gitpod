@@ -22,6 +22,7 @@ import (
 	"github.com/gitpod-io/gitpod/common-go/namegen"
 	csapi "github.com/gitpod-io/gitpod/content-service/api"
 	protocol "github.com/gitpod-io/gitpod/gitpod-protocol"
+	ide "github.com/gitpod-io/gitpod/ide-service-api/config"
 	imgbldr "github.com/gitpod-io/gitpod/image-builder/api"
 	wsmanapi "github.com/gitpod-io/gitpod/ws-manager/api"
 )
@@ -29,7 +30,7 @@ import (
 const (
 	gitpodBuiltinUserID             = "builtin-user-workspace-probe-0000000"
 	perCallTimeout                  = 5 * time.Minute
-	ParallelLunchableWorkspaceLimit = 4
+	ParallelLunchableWorkspaceLimit = 10
 )
 
 var (
@@ -132,7 +133,7 @@ func LaunchWorkspaceDirectly(t *testing.T, ctx context.Context, api *ComponentAP
 	parallelLimiter <- struct{}{}
 	defer func() {
 		if err != nil && stopWs == nil {
-			t.Log("unlock the parallelLimiter because of error during stating the workspace")
+			t.Logf("unlock the parallelLimiter because of error during starting the workspace: %v", err)
 			<-parallelLimiter
 		}
 	}()
@@ -164,7 +165,7 @@ func LaunchWorkspaceDirectly(t *testing.T, ctx context.Context, api *ComponentAP
 		}
 	}
 
-	waitErr := wait.PollImmediate(5*time.Second, 2*time.Minute, func() (bool, error) {
+	waitErr := wait.PollImmediate(1*time.Second, 2*time.Minute, func() (bool, error) {
 		workspaceImage, err = resolveOrBuildImage(ctx, api, options.BaseImage)
 		if st, ok := status.FromError(err); ok && st.Code() == codes.Unavailable {
 			api.ClearImageBuilderClientCache()
@@ -193,10 +194,11 @@ func LaunchWorkspaceDirectly(t *testing.T, ctx context.Context, api *ComponentAP
 	}
 
 	ideImage := options.IdeImage
+	ideImageLayers := make([]string, 0)
 	if ideImage == "" {
-		var cfg *ServerIDEConfigPartial
+		var cfg *ide.IDEConfig
 		for i := 0; i < 3; i++ {
-			cfg, err = GetServerIDEConfig(api.namespace, api.client)
+			cfg, err = GetIDEConfig(api.namespace, api.client)
 			if err != nil {
 				continue
 			}
@@ -204,7 +206,8 @@ func LaunchWorkspaceDirectly(t *testing.T, ctx context.Context, api *ComponentAP
 		if err != nil {
 			return nil, nil, xerrors.Errorf("cannot find server IDE config: %w", err)
 		}
-		ideImage = cfg.IDEOptions.Options.Code.Image
+		ideImage = cfg.IdeOptions.Options["code"].Image
+		ideImageLayers = cfg.IdeOptions.Options["code"].ImageLayers
 		if ideImage == "" {
 			err = xerrors.Errorf("cannot start workspaces without an IDE image (required by registry-facade resolver)")
 			return nil, nil, err
@@ -220,11 +223,11 @@ func LaunchWorkspaceDirectly(t *testing.T, ctx context.Context, api *ComponentAP
 		},
 		Type: wsmanapi.WorkspaceType_REGULAR,
 		Spec: &wsmanapi.StartWorkspaceSpec{
-			WorkspaceImage:     workspaceImage,
-			DeprecatedIdeImage: ideImage,
+			WorkspaceImage: workspaceImage,
 			IdeImage: &wsmanapi.IDEImage{
 				WebRef: ideImage,
 			},
+			IdeImageLayers:    ideImageLayers,
 			WorkspaceLocation: "/",
 			Timeout:           "30m",
 			Initializer: &csapi.WorkspaceInitializer{
@@ -263,7 +266,7 @@ func LaunchWorkspaceDirectly(t *testing.T, ctx context.Context, api *ComponentAP
 
 	var sresp *wsmanapi.StartWorkspaceResponse
 	for i := 0; i < 3; i++ {
-		t.Logf("attemp to start up the workspace directly: %s, %s", instanceID, workspaceID)
+		t.Logf("attempt to start up the workspace directly: %s, %s", instanceID, workspaceID)
 		sresp, err = wsm.StartWorkspace(ctx, req)
 		if err != nil {
 			scode := status.Code(err)
@@ -293,7 +296,7 @@ func LaunchWorkspaceDirectly(t *testing.T, ctx context.Context, api *ComponentAP
 	stopWs = stopWsF(t, req.Id, req.Metadata.MetaId, api, req.Type == wsmanapi.WorkspaceType_PREBUILD)
 	defer func() {
 		if err != nil {
-			_, _ = stopWs(false, api)
+			_, _ = stopWs(true, api)
 		}
 	}()
 
@@ -318,6 +321,23 @@ func LaunchWorkspaceDirectly(t *testing.T, ctx context.Context, api *ComponentAP
 //
 // When possible, prefer the less complex LaunchWorkspaceDirectly.
 func LaunchWorkspaceFromContextURL(t *testing.T, ctx context.Context, contextURL string, username string, api *ComponentAPI, serverOpts ...GitpodServerOpt) (*protocol.WorkspaceInfo, StopWorkspaceFunc, error) {
+	return LaunchWorkspaceWithOptions(t, ctx, &LaunchWorkspaceOptions{
+		ContextURL: contextURL,
+	}, username, api, serverOpts...)
+}
+
+type LaunchWorkspaceOptions struct {
+	ContextURL  string
+	ProjectID   string
+	IDESettings *protocol.IDESettings
+}
+
+// LaunchWorkspaceWithOptions force-creates a new workspace using the Gitpod server API,
+// and waits for the workspace to start. If any step along the way fails, this function will
+// fail the test.
+//
+// When possible, prefer the less complex LaunchWorkspaceDirectly.
+func LaunchWorkspaceWithOptions(t *testing.T, ctx context.Context, opts *LaunchWorkspaceOptions, username string, api *ComponentAPI, serverOpts ...GitpodServerOpt) (*protocol.WorkspaceInfo, StopWorkspaceFunc, error) {
 	var (
 		defaultServerOpts []GitpodServerOpt
 		stopWs            StopWorkspaceFunc = nil
@@ -345,11 +365,29 @@ func LaunchWorkspaceFromContextURL(t *testing.T, ctx context.Context, contextURL
 
 	var resp *protocol.WorkspaceCreationResult
 	for i := 0; i < 3; i++ {
-		t.Logf("attemp to create the workspace: %s", contextURL)
+		u, _ := api.GetUserId(username)
+		t.Logf("attempt to create the workspace as user %v, with context %v\n", u, opts.ContextURL)
+
+		teams, _ := server.GetTeams(cctx)
+		var orgId string
+		if len(teams) == 0 {
+			team, err := server.CreateTeam(cctx, "test-team")
+			if err != nil {
+				return nil, nil, xerrors.Errorf("cannot create team: %w", err)
+			}
+			orgId = team.ID
+		} else {
+			orgId = teams[0].ID
+		}
+
 		resp, err = server.CreateWorkspace(cctx, &protocol.CreateWorkspaceOptions{
-			ContextURL:                         contextURL,
-			IgnoreRunningPrebuild:              true,
+			ContextURL:                         opts.ContextURL,
+			ProjectId:                          opts.ProjectID,
+			OrganizationId:                     orgId,
 			IgnoreRunningWorkspaceOnSameCommit: true,
+			StartWorkspaceOptions: protocol.StartWorkspaceOptions{
+				IdeSettings: opts.IDESettings,
+			},
 		})
 		if err != nil {
 			scode := status.Code(err)
@@ -373,12 +411,25 @@ func LaunchWorkspaceFromContextURL(t *testing.T, ctx context.Context, contextURL
 		break
 	}
 
-	t.Logf("attemp to get the workspace information: %s", resp.CreatedWorkspaceID)
-	wi, err := server.GetWorkspace(ctx, resp.CreatedWorkspaceID)
-	if err != nil {
-		return nil, nil, xerrors.Errorf("cannot get workspace: %w", err)
+	t.Logf("attempt to get the workspace information: %s", resp.CreatedWorkspaceID)
+	launchStart := time.Now()
+	var wi *protocol.WorkspaceInfo
+	for i := 0; i < 3; i++ {
+		launchDuration := time.Since(launchStart)
+		wi, err = server.GetWorkspace(cctx, resp.CreatedWorkspaceID)
+		if err != nil || wi.LatestInstance == nil {
+			time.Sleep(2 * time.Second)
+			t.Logf("error or nil instance since %s", launchDuration)
+			continue
+		}
+		if wi.LatestInstance.Status.Phase != "preparing" {
+			t.Logf("not preparing")
+			break
+		}
+		t.Logf("sleeping")
+		time.Sleep(5 * time.Second)
 	}
-	if wi.LatestInstance == nil {
+	if wi == nil || wi.LatestInstance == nil {
 		return nil, nil, xerrors.Errorf("CreateWorkspace did not start the workspace")
 	}
 	t.Logf("got the workspace information: %s", wi.Workspace.ID)
@@ -389,15 +440,28 @@ func LaunchWorkspaceFromContextURL(t *testing.T, ctx context.Context, contextURL
 		wi.LatestInstance.IdeURL = resp.WorkspaceURL
 	}
 
+	if wi.LatestInstance.Status.Conditions.NeededImageBuild {
+		for ctx.Err() == nil {
+			wi, err = server.GetWorkspace(cctx, resp.CreatedWorkspaceID)
+			if err != nil {
+				return nil, nil, xerrors.Errorf("cannot get workspace: %w", err)
+			}
+			if wi.LatestInstance.Status.Phase == "running" {
+				break
+			}
+			time.Sleep(10 * time.Second)
+		}
+	}
+
 	stopWs = stopWsF(t, wi.LatestInstance.ID, resp.CreatedWorkspaceID, api, false)
 	defer func() {
 		if err != nil {
-			_, _ = stopWs(false, api)
+			_, _ = stopWs(true, api)
 		}
 	}()
 
 	t.Log("wait for workspace to be fully up and running")
-	wsState, err := WaitForWorkspaceStart(t, ctx, wi.LatestInstance.ID, resp.CreatedWorkspaceID, api)
+	wsState, err := WaitForWorkspaceStart(t, cctx, wi.LatestInstance.ID, resp.CreatedWorkspaceID, api)
 	if err != nil {
 		return nil, nil, xerrors.Errorf("failed to wait for the workspace to start up: %w", err)
 	}
@@ -411,20 +475,29 @@ func LaunchWorkspaceFromContextURL(t *testing.T, ctx context.Context, contextURL
 
 func stopWsF(t *testing.T, instanceID string, workspaceID string, api *ComponentAPI, isPrebuild bool) StopWorkspaceFunc {
 	var already bool
-	return func(waitForStop bool, api *ComponentAPI) (*wsmanapi.WorkspaceStatus, error) {
+	var unlocked bool
+	return func(waitForStop bool, api *ComponentAPI) (s *wsmanapi.WorkspaceStatus, err error) {
 		if already {
 			t.Logf("already sent stop request: %s", instanceID)
 			return nil, nil
 		}
+		already = true
 
-		var err error
-		defer func() {
-			if already {
-				return
-			} else {
+		tryUnlockParallelLimiter := func() {
+			if !unlocked {
+				unlocked = true
 				<-parallelLimiter
 			}
-			already = true
+		}
+
+		defer func() {
+			if err == nil {
+				return
+			}
+
+			// Only unlock on error here, otherwise we'll unlock below
+			// after waiting for the workspace to stop.
+			tryUnlockParallelLimiter()
 		}()
 
 		sctx, scancel := context.WithTimeout(context.Background(), perCallTimeout)
@@ -450,7 +523,7 @@ func stopWsF(t *testing.T, instanceID string, workspaceID string, api *Component
 		<-ready
 
 		for {
-			t.Logf("attemp to delete the workspace: %s", instanceID)
+			t.Logf("attempt to delete the workspace: %s", instanceID)
 			err := DeleteWorkspace(sctx, api, instanceID)
 			if err != nil {
 				if st, ok := status.FromError(err); ok && st.Code() == codes.Unavailable {
@@ -465,11 +538,8 @@ func stopWsF(t *testing.T, instanceID string, workspaceID string, api *Component
 			break
 		}
 
-		if !waitForStop {
-			return nil, nil
-		}
-
-		for {
+		waitAndUnlock := func() (*wsmanapi.WorkspaceStatus, error) {
+			defer tryUnlockParallelLimiter()
 			select {
 			case err := <-errCh:
 				return nil, err
@@ -478,6 +548,19 @@ func stopWsF(t *testing.T, instanceID string, workspaceID string, api *Component
 				return s, nil
 			}
 		}
+
+		if !waitForStop {
+			// Still wait for stop asynchroniously to unblock the parallelLimiter
+			go func() {
+				_, err = waitAndUnlock()
+				if err != nil {
+					t.Logf("error while waiting asynchronously for workspace to stop: %v", err)
+				}
+			}()
+			return nil, nil
+		}
+
+		return waitAndUnlock()
 	}
 }
 
@@ -485,12 +568,17 @@ func stopWsF(t *testing.T, instanceID string, workspaceID string, api *Component
 type WaitForWorkspaceOpt func(*waitForWorkspaceOpts)
 
 type waitForWorkspaceOpts struct {
-	CanFail bool
+	CanFail        bool
+	WaitForStopped bool
 }
 
 // WorkspaceCanFail doesn't fail the test if the workspace fails to start
 func WorkspaceCanFail(o *waitForWorkspaceOpts) {
 	o.CanFail = true
+}
+
+func WaitForStopped(o *waitForWorkspaceOpts) {
+	o.WaitForStopped = true
 }
 
 // WaitForWorkspace waits until a workspace is running. Fails the test if the workspace
@@ -499,6 +587,34 @@ func WaitForWorkspaceStart(t *testing.T, ctx context.Context, instanceID string,
 	var cfg waitForWorkspaceOpts
 	for _, o := range opts {
 		o(&cfg)
+	}
+
+	checkStatus := func(status *wsmanapi.WorkspaceStatus) (done bool, err error) {
+		if status == nil {
+			return false, nil
+		}
+		if !cfg.CanFail && status.Conditions != nil && status.Conditions.Failed != "" {
+			return true, xerrors.Errorf("workspace instance %s failed: %s", instanceID, status.Conditions.Failed)
+		}
+
+		switch status.Phase {
+		case wsmanapi.WorkspacePhase_RUNNING:
+			if !cfg.WaitForStopped {
+				// Done.
+				return true, nil
+			}
+		case wsmanapi.WorkspacePhase_STOPPING:
+			if !cfg.WaitForStopped {
+				return true, ErrWorkspaceInstanceStopping
+			}
+		case wsmanapi.WorkspacePhase_STOPPED:
+			if !cfg.WaitForStopped {
+				return true, ErrWorkspaceInstanceStopped
+			} else {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
 
 	done := make(chan *wsmanapi.WorkspaceStatus)
@@ -534,7 +650,11 @@ func WaitForWorkspaceStart(t *testing.T, ctx context.Context, instanceID string,
 			close(done)
 		}()
 		for {
-			t.Logf("check if the status of workspace is in the running phase: %s", instanceID)
+			waitForPhase := "running"
+			if cfg.WaitForStopped {
+				waitForPhase = "stopped"
+			}
+			t.Logf("check if the status of workspace is in the %s phase: %s", waitForPhase, instanceID)
 			resp, err := sub.Recv()
 			if err != nil {
 				if st, ok := status.FromError(err); ok && st.Code() == codes.Unavailable {
@@ -567,32 +687,17 @@ func WaitForWorkspaceStart(t *testing.T, ctx context.Context, instanceID string,
 				continue
 			}
 
-			t.Logf("status: %s, %s", s.Id, s.Phase)
+			t.Logf("subscribe status: %s, %s", s.Id, s.Phase)
 
-			if cfg.CanFail {
-				if s.Phase == wsmanapi.WorkspacePhase_STOPPING {
-					return
-				}
-				if s.Phase == wsmanapi.WorkspacePhase_STOPPED {
-					return
-				}
-			} else {
-				if s.Conditions.Failed != "" {
-					errStatus <- xerrors.Errorf("workspace instance %s failed: %s", instanceID, s.Conditions.Failed)
-					return
-				} else if s.Phase == wsmanapi.WorkspacePhase_STOPPING || s.Phase == wsmanapi.WorkspacePhase_STOPPED {
-					errStatus <- xerrors.Errorf("workspace instance %s is %s", instanceID, s.Phase)
-					return
-				}
-			}
-			if s.Phase != wsmanapi.WorkspacePhase_RUNNING {
-				// we're still starting
-				continue
+			done2, err := checkStatus(s)
+			if err != nil {
+				errStatus <- err
+				return
 			}
 
-			// all is well, the workspace is running
-			t.Logf("confirmed that the worksapce is running: %s, %s", s.Id, s.Phase)
-			return
+			if done2 {
+				return
+			}
 		}
 	}()
 
@@ -600,7 +705,7 @@ func WaitForWorkspaceStart(t *testing.T, ctx context.Context, instanceID string,
 		wsman, err := api.WorkspaceManager()
 		if err != nil {
 			api.ClearWorkspaceManagerClientCache()
-			return nil, true, nil
+			return nil, false, err
 		}
 		desc, err := wsman.DescribeWorkspace(ctx, &wsmanapi.DescribeWorkspaceRequest{
 			Id: instanceID,
@@ -608,36 +713,39 @@ func WaitForWorkspaceStart(t *testing.T, ctx context.Context, instanceID string,
 		if err != nil {
 			scode := status.Code(err)
 			if scode == codes.NotFound || strings.Contains(err.Error(), "not found") {
-				if !cfg.CanFail {
-					return nil, false, xerrors.New("the workspace couldn't find")
+				if cfg.WaitForStopped {
+					t.Logf("describe: workspace couldn't be found, but we're expecting it to stop, so wait for subscribe to give us the last status")
+					return nil, false, nil
 				}
-				return nil, false, nil
+				if !cfg.CanFail {
+					return nil, true, xerrors.Errorf("the workspace %s couldn't be found", instanceID)
+				}
+				return nil, true, nil
 			}
+			return nil, false, err
 		}
-		if desc != nil && desc.Status != nil {
-			switch desc.Status.Phase {
-			case wsmanapi.WorkspacePhase_RUNNING:
-				return desc.Status, false, nil
-			case wsmanapi.WorkspacePhase_STOPPING:
-				if !cfg.CanFail {
-					return nil, false, ErrWorkspaceInstanceStopping
-				}
-			case wsmanapi.WorkspacePhase_STOPPED:
-				if !cfg.CanFail {
-					return nil, false, ErrWorkspaceInstanceStopped
-				}
-			}
+
+		if desc == nil || desc.Status == nil {
+			t.Logf("describe status is nil: %s", instanceID)
+			return nil, false, nil
 		}
-		return nil, true, nil
+
+		t.Logf("describe status: %s, %s", desc.Status.Id, desc.Status.Phase)
+
+		done, err := checkStatus(desc.Status)
+		return desc.Status, done, err
 	}
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	for {
 		select {
 		case <-ticker.C:
 			// For in case missed the status change
-			desc, cont, err := handle()
-			if cont {
+			desc, done, err := handle()
+			if !done {
+				if err != nil {
+					t.Logf("error checking workspace status, trying again later: %v", err)
+				}
 				continue
 			} else if err != nil {
 				return nil, err
@@ -646,8 +754,8 @@ func WaitForWorkspaceStart(t *testing.T, ctx context.Context, instanceID string,
 			}
 		case <-reboot:
 			// Consider workspace state changes during subscriber reboot
-			desc, cont, err := handle()
-			if cont {
+			desc, done, err := handle()
+			if !done {
 				continue
 			} else if err != nil {
 				return nil, err
@@ -666,7 +774,12 @@ func WaitForWorkspaceStart(t *testing.T, ctx context.Context, instanceID string,
 
 // WaitForWorkspaceStop waits until a workspace is stopped. Fails the test if the workspace
 // fails or does not stop before the context is canceled.
-func WaitForWorkspaceStop(t *testing.T, ctx context.Context, ready chan<- struct{}, api *ComponentAPI, instanceID string, workspaceID string) (lastStatus *wsmanapi.WorkspaceStatus, err error) {
+func WaitForWorkspaceStop(t *testing.T, ctx context.Context, ready chan<- struct{}, api *ComponentAPI, instanceID string, workspaceID string, opts ...WaitForWorkspaceOpt) (lastStatus *wsmanapi.WorkspaceStatus, err error) {
+	var cfg waitForWorkspaceOpts
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	wsman, err := api.WorkspaceManager()
 	if err != nil {
 		return nil, err
@@ -728,11 +841,8 @@ func WaitForWorkspaceStop(t *testing.T, ctx context.Context, ready chan<- struct
 			}
 
 			wss = resp.GetStatus()
-			if wss.Conditions.Failed != "" {
-				// TODO(toru): we have to fix https://github.com/gitpod-io/gitpod/issues/12021
-				if wss.Conditions.Failed != "The container could not be located when the pod was deleted.  The container used to be Running" && wss.Conditions.Failed != "The container could not be located when the pod was terminated" {
-					errCh <- xerrors.Errorf("workspace instance %s failed: %s", instanceID, wss.Conditions.Failed)
-				}
+			if wss.Conditions.Failed != "" && !cfg.CanFail {
+				errCh <- xerrors.Errorf("workspace instance %s failed: %s", instanceID, wss.Conditions.Failed)
 				return
 			}
 			if wss.Phase == wsmanapi.WorkspacePhase_STOPPED {
@@ -945,17 +1055,12 @@ func DeleteWorkspace(ctx context.Context, api *ComponentAPI, instanceID string) 
 		Id: instanceID,
 	})
 	if err != nil {
+		s, ok := status.FromError(err)
+		if ok && s.Code() == codes.NotFound {
+			// Workspace is already gone.
+			return nil
+		}
 		return err
 	}
-
-	if err == nil {
-		return nil
-	}
-
-	s, ok := status.FromError(err)
-	if ok && s.Code() == codes.NotFound {
-		return nil
-	}
-
-	return err
+	return nil
 }

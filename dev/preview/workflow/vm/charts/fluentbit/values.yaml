@@ -1,0 +1,6 @@
+config:
+  outputs: |
+    [OUTPUT]
+        Name stackdriver
+        Match *
+        metadata_server http://169.254.169.254

@@ -24,7 +24,7 @@ describe("express-util", function () {
                 "http://moccasin-ferret-155799b3.ws-eu.gpl-2732-ws-csrf.staging.gitpod.io",
                 HOSTURL_HOSTNAME,
             );
-            expect(result).to.be.true;
+            expect(result).to.be.false;
         });
 
         it("should return true for dashboard", function () {
@@ -44,7 +44,7 @@ describe("express-util", function () {
 
         it("should return true for workspace locations", function () {
             const result = isAllowedWebsocketDomain("https://bronze-bird-p2q226d8.ws-eu08.gitpod.io", HOSTURL_HOSTNAME);
-            expect(result).to.be.true;
+            expect(result).to.be.false;
         });
     });
 });

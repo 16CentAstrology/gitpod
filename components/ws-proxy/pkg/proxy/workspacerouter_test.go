@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/gitpod-io/gitpod/ws-proxy/pkg/common"
 	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/mux"
 )
@@ -23,6 +24,7 @@ func TestWorkspaceRouter(t *testing.T) {
 		Status             int
 		URL                string
 		AdditionalHitCount int
+		DebugWorkspace     string
 	}
 	tests := []struct {
 		Name         string
@@ -30,7 +32,7 @@ func TestWorkspaceRouter(t *testing.T) {
 		Headers      map[string]string
 		WSHostSuffix string
 		Router       WorkspaceRouter
-		Infos        []WorkspaceInfo
+		Infos        []common.WorkspaceInfo
 		Expected     Expectation
 	}{
 		{
@@ -48,6 +50,21 @@ func TestWorkspaceRouter(t *testing.T) {
 			},
 		},
 		{
+			Name: "host-based debug workspace access",
+			URL:  "http://debug-amaranth-smelt-9ba20cc1.ws.gitpod.dev/",
+			Headers: map[string]string{
+				forwardedHostnameHeader: "debug-amaranth-smelt-9ba20cc1.ws.gitpod.dev",
+			},
+			Router:       HostBasedRouter(forwardedHostnameHeader, wsHostSuffix, wsHostRegex),
+			WSHostSuffix: wsHostSuffix,
+			Expected: Expectation{
+				DebugWorkspace: "true",
+				WorkspaceID:    "amaranth-smelt-9ba20cc1",
+				Status:         http.StatusOK,
+				URL:            "http://debug-amaranth-smelt-9ba20cc1.ws.gitpod.dev/",
+			},
+		},
+		{
 			Name: "host-based port access",
 			URL:  "http://1234-amaranth-smelt-9ba20cc1.ws.gitpod.dev/",
 			Headers: map[string]string{
@@ -60,6 +77,22 @@ func TestWorkspaceRouter(t *testing.T) {
 				WorkspacePort: "1234",
 				Status:        http.StatusOK,
 				URL:           "http://1234-amaranth-smelt-9ba20cc1.ws.gitpod.dev/",
+			},
+		},
+		{
+			Name: "host-based debug port access",
+			URL:  "http://1234-debug-amaranth-smelt-9ba20cc1.ws.gitpod.dev/",
+			Headers: map[string]string{
+				forwardedHostnameHeader: "1234-debug-amaranth-smelt-9ba20cc1.ws.gitpod.dev",
+			},
+			Router:       HostBasedRouter(forwardedHostnameHeader, wsHostSuffix, wsHostRegex),
+			WSHostSuffix: wsHostSuffix,
+			Expected: Expectation{
+				DebugWorkspace: "true",
+				WorkspaceID:    "amaranth-smelt-9ba20cc1",
+				WorkspacePort:  "1234",
+				Status:         http.StatusOK,
+				URL:            "http://1234-debug-amaranth-smelt-9ba20cc1.ws.gitpod.dev/",
 			},
 		},
 	}
@@ -77,8 +110,9 @@ func TestWorkspaceRouter(t *testing.T) {
 					return
 				}
 
-				act.WorkspaceID = vars[workspaceIDIdentifier]
-				act.WorkspacePort = vars[workspacePortIdentifier]
+				act.WorkspaceID = vars[common.WorkspaceIDIdentifier]
+				act.WorkspacePort = vars[common.WorkspacePortIdentifier]
+				act.DebugWorkspace = vars[common.DebugWorkspaceIdentifier]
 				act.URL = req.URL.String()
 				act.AdditionalHitCount++
 			}
@@ -159,7 +193,7 @@ func TestMatchWorkspaceHostHeader(t *testing.T) {
 			Expected: matchResult{
 				MatchesWorkspace: true,
 				WorkspaceVars: map[string]string{
-					workspaceIDIdentifier: "amaranth-smelt-9ba20cc1",
+					common.WorkspaceIDIdentifier: "amaranth-smelt-9ba20cc1",
 				},
 			},
 		},
@@ -169,8 +203,8 @@ func TestMatchWorkspaceHostHeader(t *testing.T) {
 			Expected: matchResult{
 				MatchesPort: true,
 				PortVars: map[string]string{
-					workspaceIDIdentifier:   "amaranth-smelt-9ba20cc1",
-					workspacePortIdentifier: "8080",
+					common.WorkspaceIDIdentifier:   "amaranth-smelt-9ba20cc1",
+					common.WorkspacePortIdentifier: "8080",
 				},
 			},
 		},

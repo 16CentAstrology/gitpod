@@ -2,16 +2,15 @@
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM alpine:3.16
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:1ec3327af43d7af231ffe475aff88d49dbb5e09af9f28610e6afbd2cb096e751
 
 # Ensure latest packages are present, like security updates.
-RUN  apk upgrade --no-cache
+RUN apk upgrade --no-cache \
+  && apk add ca-certificates --no-cache
 
 RUN adduser -S -D -H -h /app -u 1000 appuser
 COPY components-registry-facade--app/registry-facade /app/registry-facade
 RUN chown -R appuser /app
-
-COPY dev-ready-probe-labeler--app/ready-probe-labeler /app/ready-probe-labeler
 
 USER appuser
 

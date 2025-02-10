@@ -115,7 +115,7 @@ func writeCharts(chart *charts.Chart) (string, error) {
 
 // AffinityYaml convert an affinity into a YAML byte array
 func AffinityYaml(orLabels ...string) ([]byte, error) {
-	affinities := common.NodeAffinity(orLabels...)
+	affinities := nodeAffinity(orLabels...)
 
 	marshal, err := yaml.Marshal(affinities)
 	if err != nil {
@@ -125,6 +125,28 @@ func AffinityYaml(orLabels ...string) ([]byte, error) {
 	return marshal, nil
 }
 
+func nodeAffinity(orLabels ...string) *corev1.Affinity {
+	var terms []corev1.NodeSelectorTerm
+	for _, lbl := range orLabels {
+		terms = append(terms, corev1.NodeSelectorTerm{
+			MatchExpressions: []corev1.NodeSelectorRequirement{
+				{
+					Key:      lbl,
+					Operator: corev1.NodeSelectorOpExists,
+				},
+			},
+		})
+	}
+
+	return &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: terms,
+			},
+		},
+	}
+}
+
 func ImagePullSecrets(key string, ctx *common.RenderContext) string {
 	if len(ctx.Config.ImagePullSecrets) > 0 {
 		var pullSecrets []string
@@ -132,8 +154,7 @@ func ImagePullSecrets(key string, ctx *common.RenderContext) string {
 			pullSecrets = append(pullSecrets, i.Name)
 		}
 
-		// Helm array nomenclature
-		return KeyValue(key, fmt.Sprintf("{%s}", strings.Join(pullSecrets, ",")))
+		return KeyValueArray(key, pullSecrets)
 	}
 
 	// Nothing to be set

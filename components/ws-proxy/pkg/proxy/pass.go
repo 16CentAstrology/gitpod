@@ -18,6 +18,7 @@ import (
 	"golang.org/x/xerrors"
 
 	"github.com/gitpod-io/gitpod/common-go/log"
+	"github.com/gitpod-io/gitpod/ws-proxy/pkg/common"
 )
 
 // ProxyPassConfig is used as intermediate struct to assemble a configurable proxy.
@@ -40,7 +41,7 @@ type proxyPassOpt func(h *proxyPassConfig)
 type errorHandler func(http.ResponseWriter, *http.Request, error)
 
 // targetResolver is a function that determines to which target to forward the given HTTP request to.
-type targetResolver func(*Config, WorkspaceInfoProvider, *http.Request) (*url.URL, error)
+type targetResolver func(*Config, common.WorkspaceInfoProvider, *http.Request) (*url.URL, string, error)
 
 type responseHandler func(*http.Response, *http.Request) error
 
@@ -100,7 +101,7 @@ func NewSingleHostReverseProxy(target *url.URL, useTargetHost bool) *httputil.Re
 }
 
 // proxyPass is the function that assembles a ProxyHandler from the config, a resolver and various options and returns a http.HandlerFunc.
-func proxyPass(config *RouteHandlerConfig, infoProvider WorkspaceInfoProvider, resolver targetResolver, opts ...proxyPassOpt) http.HandlerFunc {
+func proxyPass(config *RouteHandlerConfig, infoProvider common.WorkspaceInfoProvider, resolver targetResolver, opts ...proxyPassOpt) http.HandlerFunc {
 	h := proxyPassConfig{
 		Transport: config.DefaultTransport,
 	}
@@ -118,7 +119,7 @@ func proxyPass(config *RouteHandlerConfig, infoProvider WorkspaceInfoProvider, r
 	}
 
 	return func(w http.ResponseWriter, req *http.Request) {
-		targetURL, err := h.TargetResolver(config.Config, infoProvider, req)
+		targetURL, targetResource, err := h.TargetResolver(config.Config, infoProvider, req)
 		if err != nil {
 			if h.ErrorHandler != nil {
 				h.ErrorHandler(w, req, err)
@@ -127,6 +128,8 @@ func proxyPass(config *RouteHandlerConfig, infoProvider WorkspaceInfoProvider, r
 			}
 			return
 		}
+		req = withResourceMetricsLabel(req, targetResource)
+		req = withHttpVersionMetricsLabel(req)
 
 		originalURL := *req.URL
 
@@ -209,10 +212,16 @@ func withHTTPErrorHandler(h http.Handler) proxyPassOpt {
 	}
 }
 
-func createDefaultTransport(config *TransportConfig) *http.Transport {
+func withErrorHandler(h errorHandler) proxyPassOpt {
+	return func(cfg *proxyPassConfig) {
+		cfg.ErrorHandler = h
+	}
+}
+
+func createDefaultTransport(config *TransportConfig) http.RoundTripper {
 	// TODO equivalent of client_max_body_size 2048m; necessary ???
 	// this is based on http.DefaultTransport, with some values exposed to config
-	return &http.Transport{
+	return instrumentClientMetrics(&http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   time.Duration(config.ConnectTimeout), // default: 30s
@@ -225,7 +234,7 @@ func createDefaultTransport(config *TransportConfig) *http.Transport {
 		IdleConnTimeout:       time.Duration(config.IdleConnTimeout), // default: 90s
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-	}
+	})
 }
 
 // tell the browser to cache for 1 year and don't ask the server during this period.

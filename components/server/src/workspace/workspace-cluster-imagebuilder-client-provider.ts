@@ -4,11 +4,11 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { Workspace, WorkspaceInstance } from "@gitpod/gitpod-protocol";
-import { defaultGRPCOptions, IClientCallMetrics } from "@gitpod/gitpod-protocol/lib/util/grpc";
+import { User, Workspace, WorkspaceInstance } from "@gitpod/gitpod-protocol";
+import { defaultGRPCOptions } from "@gitpod/gitpod-protocol/lib/util/grpc";
+import { WorkspaceRegion } from "@gitpod/gitpod-protocol/lib/workspace-cluster";
 import {
     ImageBuilderClient,
-    ImageBuilderClientCallMetrics,
     ImageBuilderClientProvider,
     PromisifiedImageBuilderClient,
 } from "@gitpod/image-builder/lib";
@@ -17,34 +17,32 @@ import {
     WorkspaceManagerClientProviderCompositeSource,
     WorkspaceManagerClientProviderSource,
 } from "@gitpod/ws-manager/lib/client-provider-source";
-import { ExtendedUser } from "@gitpod/ws-manager/lib/constraints";
-import { inject, injectable, optional } from "inversify";
+import { inject, injectable } from "inversify";
 
 @injectable()
 export class WorkspaceClusterImagebuilderClientProvider implements ImageBuilderClientProvider {
     @inject(WorkspaceManagerClientProviderCompositeSource)
     protected readonly source: WorkspaceManagerClientProviderSource;
     @inject(WorkspaceManagerClientProvider) protected readonly clientProvider: WorkspaceManagerClientProvider;
-    @inject(ImageBuilderClientCallMetrics) @optional() protected readonly clientCallMetrics: IClientCallMetrics;
 
     // gRPC connections can be used concurrently, even across services.
     // Thus it makes sense to cache them rather than create a new connection for each request.
     protected readonly connectionCache = new Map<string, ImageBuilderClient>();
 
     async getClient(
-        applicationCluster: string,
-        user: ExtendedUser,
-        workspace: Workspace,
-        instance: WorkspaceInstance,
+        user: User,
+        workspace?: Workspace,
+        instance?: WorkspaceInstance,
+        region?: WorkspaceRegion,
     ): Promise<PromisifiedImageBuilderClient> {
-        const clusters = await this.clientProvider.getStartClusterSets(applicationCluster, user, workspace, instance);
-        for await (let cluster of clusters) {
-            const info = await this.source.getWorkspaceCluster(cluster.installation, applicationCluster);
+        const clusters = await this.clientProvider.getStartClusterSets(user, workspace, instance, region);
+        for await (const cluster of clusters) {
+            const info = await this.source.getWorkspaceCluster(cluster.installation);
             if (!info) {
                 continue;
             }
 
-            var client = this.connectionCache.get(info.name);
+            let client = this.connectionCache.get(info.name);
             if (!client) {
                 client = this.clientProvider.createConnection(ImageBuilderClient, info, defaultGRPCOptions);
                 this.connectionCache.set(info.name, client);

@@ -6,6 +6,7 @@ package cgroup
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -57,11 +58,11 @@ func (c *IOLimiterV2) Apply(ctx context.Context, opts *PluginOptions) error {
 	}()
 
 	go func() {
-		log.WithField("cgroupPath", opts.CgroupPath).Debug("starting io limiting")
+		log.WithFields(log.OWI("", "", opts.InstanceId)).WithField("cgroupPath", opts.CgroupPath).Debug("starting io limiting")
 
 		_, err := v2.NewManager(opts.BasePath, filepath.Join("/", opts.CgroupPath), c.limits)
 		if err != nil {
-			log.WithError(err).WithField("basePath", opts.BasePath).WithField("cgroupPath", opts.CgroupPath).WithField("limits", c.limits).Error("cannot write IO limits")
+			log.WithError(err).WithFields(log.OWI("", "", opts.InstanceId)).WithField("basePath", opts.BasePath).WithField("cgroupPath", opts.CgroupPath).WithField("limits", c.limits).Warn("cannot write IO limits")
 		}
 
 		for {
@@ -69,7 +70,7 @@ func (c *IOLimiterV2) Apply(ctx context.Context, opts *PluginOptions) error {
 			case <-update:
 				_, err := v2.NewManager(opts.BasePath, filepath.Join("/", opts.CgroupPath), c.limits)
 				if err != nil {
-					log.WithError(err).WithField("basePath", opts.BasePath).WithField("cgroupPath", opts.CgroupPath).WithField("limits", c.limits).Error("cannot write IO limits")
+					log.WithError(err).WithFields(log.OWI("", "", opts.InstanceId)).WithField("basePath", opts.BasePath).WithField("cgroupPath", opts.CgroupPath).WithField("limits", c.limits).Error("cannot write IO limits")
 				}
 			case <-ctx.Done():
 				// Prior to shutting down though, we need to reset the IO limits to ensure we don't have
@@ -77,9 +78,9 @@ func (c *IOLimiterV2) Apply(ctx context.Context, opts *PluginOptions) error {
 				// workspace pod from shutting down.
 				_, err := v2.NewManager(opts.BasePath, filepath.Join("/", opts.CgroupPath), &v2.Resources{})
 				if err != nil {
-					log.WithError(err).WithField("cgroupPath", opts.CgroupPath).Error("cannot write IO limits")
+					log.WithError(err).WithFields(log.OWI("", "", opts.InstanceId)).WithField("cgroupPath", opts.CgroupPath).Error("cannot write IO limits")
 				}
-				log.WithField("cgroupPath", opts.CgroupPath).Debug("stopping io limiting")
+				log.WithFields(log.OWI("", "", opts.InstanceId)).WithField("cgroupPath", opts.CgroupPath).Debug("stopping io limiting")
 				return
 			}
 		}
@@ -142,4 +143,28 @@ func buildV2Limits(writeBytesPerSecond, readBytesPerSecond, writeIOPs, readIOPs 
 	log.WithField("resources", resources).Debug("cgroups v2 limits")
 
 	return resources
+}
+
+// TODO: enable custom configuration
+var blockDevices = []string{"dm*", "sd*", "md*", "nvme*"}
+
+func buildDevices() []string {
+	var devices []string
+	for _, wc := range blockDevices {
+		matches, err := filepath.Glob(filepath.Join("/sys/block", wc, "dev"))
+		if err != nil {
+			log.WithField("wc", wc).Warn("cannot glob devices")
+			continue
+		}
+
+		for _, dev := range matches {
+			fc, err := os.ReadFile(dev)
+			if err != nil {
+				log.WithField("dev", dev).WithError(err).Error("cannot read device file")
+			}
+			devices = append(devices, strings.TrimSpace(string(fc)))
+		}
+	}
+
+	return devices
 }

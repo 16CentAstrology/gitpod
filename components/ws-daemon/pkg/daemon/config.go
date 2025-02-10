@@ -12,7 +12,6 @@ import (
 	"github.com/gitpod-io/gitpod/ws-daemon/pkg/content"
 	"github.com/gitpod-io/gitpod/ws-daemon/pkg/cpulimit"
 	"github.com/gitpod-io/gitpod/ws-daemon/pkg/diskguard"
-	"github.com/gitpod-io/gitpod/ws-daemon/pkg/hosts"
 	"github.com/gitpod-io/gitpod/ws-daemon/pkg/iws"
 	"github.com/gitpod-io/gitpod/ws-daemon/pkg/netlimit"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -22,21 +21,30 @@ import (
 type Config struct {
 	Runtime RuntimeConfig `json:"runtime"`
 
-	Content        content.Config           `json:"content"`
-	Uidmapper      iws.UidmapperConfig      `json:"uidmapper"`
-	CPULimit       cpulimit.Config          `json:"cpulimit"`
-	IOLimit        IOLimitConfig            `json:"ioLimit"`
-	ProcLimit      int64                    `json:"procLimit"`
-	NetLimit       netlimit.Config          `json:"netlimit"`
-	OOMScores      cgroup.OOMScoreAdjConfig `json:"oomScores"`
-	Hosts          hosts.Config             `json:"hosts"`
-	DiskSpaceGuard diskguard.Config         `json:"disk"`
+	Content             content.Config            `json:"content"`
+	Uidmapper           iws.UidmapperConfig       `json:"uidmapper"`
+	CPULimit            cpulimit.Config           `json:"cpulimit"`
+	IOLimit             IOLimitConfig             `json:"ioLimit"`
+	ProcLimit           int64                     `json:"procLimit"`
+	NetLimit            netlimit.Config           `json:"netlimit"`
+	OOMScores           cgroup.OOMScoreAdjConfig  `json:"oomScores"`
+	DiskSpaceGuard      diskguard.Config          `json:"disk"`
+	WorkspaceController WorkspaceControllerConfig `json:"workspaceController"`
+
+	RegistryFacadeHost string `json:"registryFacadeHost,omitempty"`
+}
+
+type WorkspaceControllerConfig struct {
+	MaxConcurrentReconciles int `json:"maxConcurrentReconciles,omitempty"`
 }
 
 type RuntimeConfig struct {
 	Container           *container.Config `json:"containerRuntime"`
 	Kubeconfig          string            `json:"kubeconfig"`
 	KubernetesNamespace string            `json:"namespace"`
+	SecretsNamespace    string            `json:"secretsNamespace"`
+
+	WorkspaceCIDR string `json:"workspaceCIDR,omitempty"`
 }
 
 type IOLimitConfig struct {

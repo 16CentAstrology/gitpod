@@ -9,7 +9,18 @@
         "logo": "https://ide.gitpod.io/image/ide-logo/vscode.svg",
         "label": "Browser",
         "image": "eu.gcr.io/gitpod-core-dev/build/ide/code:commit-d6329814c2aa34c414574fd0d1301447d6fe82c9",
-        "latestImage": "eu.gcr.io/gitpod-core-dev/build/ide/code:nightly@sha256:8669f6ab8dceefde11138bf4bc0ee73b934b2cc47e6135426f05fb4343ec5ab1"
+        "latestImage": "eu.gcr.io/gitpod-core-dev/build/ide/code:nightly@sha256:8669f6ab8dceefde11138bf4bc0ee73b934b2cc47e6135426f05fb4343ec5ab1",
+        "allowPin": true,
+        "versions": [
+          {
+            "version": "1.87.0",
+            "image": "eu.gcr.io/gitpod-core-dev/build/ide/code:commit-82dc424633bdc7266b46302042dd98af201fa8f8"
+          },
+          {
+            "version": "1.86.2",
+            "image": "eu.gcr.io/gitpod-core-dev/build/ide/code:commit-d86f6aa033943c9650d06339915e68063b0cf142"
+          }
+        ]
       },
       "code-desktop": {
         "orderKey": "02",
@@ -26,8 +37,14 @@
         "logo": "https://ide.gitpod.io/image/ide-logo/golandLogo.svg",
         "image": "eu.gcr.io/gitpod-core-dev/build/ide/goland:commit-9a6c79a91b2b1f583d5bcb7f9f1ef54ee977e0df",
         "latestImage": "eu.gcr.io/gitpod-core-dev/build/ide/goland:latest@sha256:e07524e52089829dc8d3b38f7d18fb51b24f07aed7d8e4e6e447899687978d43",
-        "pluginImage": "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a",
-        "pluginLatestImage": "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a-latest"
+        "imageLayers": [
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a",
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-launcher:commit-b38092639d1783a1957894ddd4f492b3cdc9794a"
+        ],
+        "latestImageLayers": [
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a-latest",
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-launcher:commit-b38092639d1783a1957894ddd4f492b3cdc9794a"
+        ]
       },
       "intellij": {
         "orderKey": "04",
@@ -36,8 +53,33 @@
         "logo": "https://ide.gitpod.io/image/ide-logo/intellijIdeaLogo.svg",
         "image": "eu.gcr.io/gitpod-core-dev/build/ide/intellij:commit-9a6c79a91b2b1f583d5bcb7f9f1ef54ee977e0df",
         "latestImage": "eu.gcr.io/gitpod-core-dev/build/ide/intellij:latest@sha256:e07524e52089829dc8d3b38f7d18fb51b24f07aed7d8e4e6e447899687978d43",
-        "pluginImage": "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a",
-        "pluginLatestImage": "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a-latest"
+        "imageLayers": [
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a",
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-launcher:commit-b38092639d1783a1957894ddd4f492b3cdc9794a"
+        ],
+        "latestImageLayers": [
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a-latest",
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-launcher:commit-b38092639d1783a1957894ddd4f492b3cdc9794a"
+        ],
+        "allowPin": true,
+        "versions": [
+          {
+            "version": "2024.1.2",
+            "image": "ide/jb/2024.1.2/image",
+            "imageLayers": [
+              "ide/jb-2024.1.2/layer_1",
+              "ide/jb-2024.1.2/layer_2"
+            ]
+          },
+          {
+            "version": "2024.1",
+            "image": "ide/jb/2024.1/image",
+            "imageLayers": [
+              "ide/jb-2024.1/layer_1",
+              "ide/jb-2024.1/layer_2"
+            ]
+          }
+        ]
       },
       "phpstorm": {
         "orderKey": "07",
@@ -46,8 +88,14 @@
         "logo": "https://ide.gitpod.io/image/ide-logo/phpstormLogo.svg",
         "image": "eu.gcr.io/gitpod-core-dev/build/ide/phpstorm:commit-9a6c79a91b2b1f583d5bcb7f9f1ef54ee977e0df",
         "latestImage": "eu.gcr.io/gitpod-core-dev/build/ide/phpstorm:latest@sha256:e07524e52089829dc8d3b38f7d18fb51b24f07aed7d8e4e6e447899687978d43",
-        "pluginImage": "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a",
-        "pluginLatestImage": "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a-latest"
+        "imageLayers": [
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a",
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-launcher:commit-b38092639d1783a1957894ddd4f492b3cdc9794a"
+        ],
+        "latestImageLayers": [
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a-latest",
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-launcher:commit-b38092639d1783a1957894ddd4f492b3cdc9794a"
+        ]
       },
       "pycharm": {
         "orderKey": "06",
@@ -56,8 +104,14 @@
         "logo": "https://ide.gitpod.io/image/ide-logo/pycharmLogo.svg",
         "image": "eu.gcr.io/gitpod-core-dev/build/ide/pycharm:commit-9a6c79a91b2b1f583d5bcb7f9f1ef54ee977e0df",
         "latestImage": "eu.gcr.io/gitpod-core-dev/build/ide/pycharm:latest@sha256:e07524e52089829dc8d3b38f7d18fb51b24f07aed7d8e4e6e447899687978d43",
-        "pluginImage": "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a",
-        "pluginLatestImage": "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a-latest"
+        "imageLayers": [
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a",
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-launcher:commit-b38092639d1783a1957894ddd4f492b3cdc9794a"
+        ],
+        "latestImageLayers": [
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-backend-plugin:commit-b38092639d1783a1957894ddd4f492b3cdc9794a-latest",
+          "eu.gcr.io/gitpod-core-dev/build/ide/jb-launcher:commit-b38092639d1783a1957894ddd4f492b3cdc9794a"
+        ]
       }
     },
     "defaultIde": "code",
@@ -73,6 +127,18 @@
         ],
         "installationSteps": [
           "If you don't see an open dialog in your browser, make sure you have the \u003ca target='_blank' class='gp-link' href='https://www.gitpod.io/docs/ides-and-editors/jetbrains-gateway#getting-started-jetbrains-gateway'\u003eJetBrains Gateway with Gitpod Plugin\u003c/a\u003e installed on your machine, and then click \u003cb\u003e${OPEN_LINK_LABEL}\u003c/b\u003e below."
+        ]
+      },
+      "jetbrains-toolbox": {
+        "defaultDesktopIDE": "intellij",
+        "desktopIDEs": [
+          "intellij",
+          "goland",
+          "pycharm",
+          "phpstorm"
+        ],
+        "installationSteps": [
+          "If you don't see an open dialog in your browser, make sure you have the \u003ca target='_blank' class='gp-link' href='https://www.gitpod.io/docs/ides-and-editors/jetbrains-gateway#getting-started-jetbrains-gateway'\u003eJetBrains Toolbox with Gitpod Plugin\u003c/a\u003e installed on your machine, and then click \u003cb\u003e${OPEN_LINK_LABEL}\u003c/b\u003e below."
         ]
       },
       "vscode": {

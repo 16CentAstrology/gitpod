@@ -38,6 +38,9 @@ werft job run github -a with-preview=true -a with-integration-tests=webapp -f
 
 You may want to run tests to assert whether a Gitpod installation is successfully integrated.
 
+> Use a preview environment with a large VM to run the tests. The tests run in parallel and can consume a large amount of recources. Create one as follows:
+> `TF_VAR_with_large_vm=true leeway run dev:preview`
+
 ### Go test
 
 This is best for when you're actively developing Gitpod.
@@ -58,17 +61,22 @@ If you want to run an entire test suite, the easiest is to use `./test/run.sh`:
 ./test/run.sh
 
 # This will run only the webapp test suite
-./test/run.sh webapp
+./test/run.sh -s webapp
+
+# This will run only the webapp test suite with the report
+./test/run.sh -s webapp -r report.csv
 ```
 
 If you're iterating on a single test, the easiest is to use `go test` directly.
-If your integration tests depends on having having a user token available, then you'll have to set `USER_TOKEN` manually (see `test/run.sh` on how to fetch the credentials that are used during our build)
+
+If your integration tests depends on having having a user token available, then you'll have to set `USER_NAME` and `USER_TOKEN` environment variables. This can be done a couple ways:
+1. Get credentials persisted as secrets (either in Github Actions, or GCP Secret Manager via the `core-dev` project), which vary by job that trigger tests. Refer to `run.sh` for details.
+2. In your Gitpod (preview) environment, log into the preview environment, set `USER_NAME` to the user you logged in with, and set `USER_TOKEN` to any (does not have to be valid).
 
 ```console
 cd test
 go test -v ./... \
     -run <test> \
-    -kubeconfig=/home/gitpod/.kube/config \
     -namespace=default \
     -username=<gitpod_user_with_oauth_setup> \
     -enterprise=<true|false> \
@@ -80,9 +88,8 @@ A concrete example would be
 ```console
 cd test
 go test -v ./... \
-    -kubeconfig=/home/gitpod/.kube/config \
     -namespace=default \
-    -run TestAdminBlockUser
+    -run TestWorkspaceInstrumentation
 ```
 
 # Tips

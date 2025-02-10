@@ -12,8 +12,6 @@ import (
 	"sort"
 	"strings"
 
-	"google.golang.org/protobuf/proto"
-
 	connect "github.com/bufbuild/connect-go"
 	"github.com/gitpod-io/gitpod/common-go/experiments"
 	"github.com/gitpod-io/gitpod/common-go/log"
@@ -78,7 +76,7 @@ func (s *TokensService) CreatePersonalAccessToken(ctx context.Context, req *conn
 
 	pat, err := auth.GeneratePersonalAccessToken(s.signer)
 	if err != nil {
-		log.WithError(err).Errorf("Failed to generate personal access token for user %s", userID.String())
+		log.Extract(ctx).WithError(err).Errorf("Failed to generate personal access token for user %s", userID.String())
 		return nil, connect.NewError(connect.CodeInternal, errors.New("Failed to generate personal access token."))
 	}
 
@@ -91,7 +89,7 @@ func (s *TokensService) CreatePersonalAccessToken(ctx context.Context, req *conn
 		ExpirationTime: expiry.AsTime().UTC(),
 	})
 	if err != nil {
-		log.WithError(err).Errorf("Failed to store personal access token for user %s", userID.String())
+		log.Extract(ctx).WithError(err).Errorf("Failed to store personal access token for user %s", userID.String())
 		return nil, connect.NewError(connect.CodeInternal, errors.New("Failed to store personal access token."))
 	}
 
@@ -101,7 +99,7 @@ func (s *TokensService) CreatePersonalAccessToken(ctx context.Context, req *conn
 }
 
 func (s *TokensService) GetPersonalAccessToken(ctx context.Context, req *connect.Request[v1.GetPersonalAccessTokenRequest]) (*connect.Response[v1.GetPersonalAccessTokenResponse], error) {
-	tokenID, err := validateTokenID(req.Msg.GetId())
+	tokenID, err := validatePersonalAccessTokenID(ctx, req.Msg.GetId())
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +149,7 @@ func (s *TokensService) ListPersonalAccessTokens(ctx context.Context, req *conne
 }
 
 func (s *TokensService) RegeneratePersonalAccessToken(ctx context.Context, req *connect.Request[v1.RegeneratePersonalAccessTokenRequest]) (*connect.Response[v1.RegeneratePersonalAccessTokenResponse], error) {
-	tokenID, err := validateTokenID(req.Msg.GetId())
+	tokenID, err := validatePersonalAccessTokenID(ctx, req.Msg.GetId())
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +170,7 @@ func (s *TokensService) RegeneratePersonalAccessToken(ctx context.Context, req *
 	}
 	pat, err := auth.GeneratePersonalAccessToken(s.signer)
 	if err != nil {
-		log.WithError(err).Errorf("Failed to regenerate personal access token for user %s", userID.String())
+		log.Extract(ctx).WithError(err).Errorf("Failed to regenerate personal access token for user %s", userID.String())
 		return nil, connect.NewError(connect.CodeInternal, errors.New("Failed to regenerate personal access token."))
 	}
 
@@ -183,7 +181,7 @@ func (s *TokensService) RegeneratePersonalAccessToken(ctx context.Context, req *
 			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Personal Access Token with ID %s for User %s does not exist", tokenID.String(), userID.String()))
 		}
 
-		log.WithError(err).Errorf("Failed to store personal access token for user %s", userID.String())
+		log.Extract(ctx).WithError(err).Errorf("Failed to store personal access token for user %s", userID.String())
 		return nil, connect.NewError(connect.CodeInternal, errors.New("Failed to store personal access token."))
 	}
 
@@ -203,7 +201,7 @@ func (s *TokensService) UpdatePersonalAccessToken(ctx context.Context, req *conn
 
 	tokenReq := req.Msg.GetToken()
 
-	tokenID, err := validateTokenID(tokenReq.GetId())
+	tokenID, err := validatePersonalAccessTokenID(ctx, tokenReq.GetId())
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +257,7 @@ func (s *TokensService) UpdatePersonalAccessToken(ctx context.Context, req *conn
 			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Personal Access Token with ID %s for User %s does not exist", tokenID.String(), userID.String()))
 		}
 
-		log.WithError(err).Error("Failed to update PAT for user")
+		log.Extract(ctx).WithError(err).Error("Failed to update PAT for user")
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Failed to update token (ID %s) for user (ID %s).", tokenID.String(), userID.String()))
 	}
 
@@ -269,7 +267,7 @@ func (s *TokensService) UpdatePersonalAccessToken(ctx context.Context, req *conn
 }
 
 func (s *TokensService) DeletePersonalAccessToken(ctx context.Context, req *connect.Request[v1.DeletePersonalAccessTokenRequest]) (*connect.Response[v1.DeletePersonalAccessTokenResponse], error) {
-	tokenID, err := validateTokenID(req.Msg.GetId())
+	tokenID, err := validatePersonalAccessTokenID(ctx, req.Msg.GetId())
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +288,7 @@ func (s *TokensService) DeletePersonalAccessToken(ctx context.Context, req *conn
 			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Personal Access Token with ID %s for User %s does not exist", tokenID.String(), userID.String()))
 		}
 
-		log.WithError(err).Errorf("failed to delete personal access token (ID: %s) for user %s", tokenID.String(), userID.String())
+		log.Extract(ctx).WithError(err).Errorf("failed to delete personal access token (ID: %s) for user %s", tokenID.String(), userID.String())
 		return nil, connect.NewError(connect.CodeInternal, errors.New("Failed to delete personal access token."))
 	}
 
@@ -303,9 +301,7 @@ func (s *TokensService) getUser(ctx context.Context, conn protocol.APIInterface)
 		return nil, uuid.Nil, proxy.ConvertError(err)
 	}
 
-	if !s.isFeatureEnabled(ctx, conn, user) {
-		return nil, uuid.Nil, connect.NewError(connect.CodePermissionDenied, errors.New("This feature is currently in beta. If you would like to be part of the beta, please contact us."))
-	}
+	log.AddFields(ctx, log.UserID(user.ID))
 
 	userID, err := uuid.Parse(user.ID)
 	if err != nil {
@@ -313,29 +309,6 @@ func (s *TokensService) getUser(ctx context.Context, conn protocol.APIInterface)
 	}
 
 	return user, userID, nil
-}
-
-func (s *TokensService) isFeatureEnabled(ctx context.Context, conn protocol.APIInterface, user *protocol.User) bool {
-	if user == nil {
-		return false
-	}
-
-	if experiments.IsPersonalAccessTokensEnabled(ctx, s.expClient, experiments.Attributes{UserID: user.ID}) {
-		return true
-	}
-
-	teams, err := conn.GetTeams(ctx)
-	if err != nil {
-		log.WithError(err).Warnf("Failed to retreive Teams for user %s, personal access token feature flag will not evaluate team membership.", user.ID)
-		teams = nil
-	}
-	for _, team := range teams {
-		if experiments.IsPersonalAccessTokensEnabled(ctx, s.expClient, experiments.Attributes{TeamID: team.ID}) {
-			return true
-		}
-	}
-
-	return false
 }
 
 func getConnection(ctx context.Context, pool proxy.ServerConnectionPool) (protocol.APIInterface, error) {
@@ -346,25 +319,11 @@ func getConnection(ctx context.Context, pool proxy.ServerConnectionPool) (protoc
 
 	conn, err := pool.Get(ctx, token)
 	if err != nil {
-		log.Log.WithError(err).Error("Failed to get connection to server.")
+		log.Extract(ctx).WithError(err).Error("Failed to get connection to server.")
 		return nil, connect.NewError(connect.CodeInternal, errors.New("Failed to establish connection to downstream services. If this issue persists, please contact Gitpod Support."))
 	}
 
 	return conn, nil
-}
-
-func validateTokenID(id string) (uuid.UUID, error) {
-	trimmed := strings.TrimSpace(id)
-	if trimmed == "" {
-		return uuid.Nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Token ID is a required argument."))
-	}
-
-	tokenID, err := uuid.Parse(trimmed)
-	if err != nil {
-		return uuid.Nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Token ID must be a valid UUID"))
-	}
-
-	return tokenID, nil
 }
 
 func personalAccessTokensToAPI(ts []db.PersonalAccessToken) []*v1.PersonalAccessToken {
@@ -428,17 +387,4 @@ func validateScopes(scopes []string) ([]string, error) {
 	}
 
 	return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Tokens can currently only have no scopes (empty), or all scopes represented as [%s, %s]", allFunctionsScope, defaultResourceScope))
-}
-
-func validateFieldMask(mask *fieldmaskpb.FieldMask, message proto.Message) (*fieldmaskpb.FieldMask, error) {
-	if mask == nil {
-		return &fieldmaskpb.FieldMask{}, nil
-	}
-
-	mask.Normalize()
-	if !mask.IsValid(message) {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("Invalid field mask specified."))
-	}
-
-	return mask, nil
 }

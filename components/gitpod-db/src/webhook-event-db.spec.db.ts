@@ -5,11 +5,11 @@
  */
 
 import * as chai from "chai";
-import { suite, test, timeout } from "mocha-typescript";
+import { suite, test, timeout } from "@testdeck/mocha";
 import { testContainer } from "./test-container";
 import { TypeORM } from "./typeorm/typeorm";
 import { WebhookEventDB } from "./webhook-event-db";
-import { DBWebhookEvent } from "./typeorm/entity/db-webhook-event";
+import { resetDB } from "./test/reset-db";
 const expect = chai.expect;
 
 @suite
@@ -27,9 +27,7 @@ export class WebhookEventDBSpec {
     }
 
     protected async clear() {
-        const connection = await this.typeORM.getConnection();
-        const manager = connection.manager;
-        await manager.clear(DBWebhookEvent);
+        await resetDB(this.typeORM);
     }
 
     @test public async testSafeUpdate() {
@@ -64,9 +62,8 @@ export class WebhookEventDBSpec {
 
         await this.db.deleteOldEvents(0, 1);
 
-        const event = (await this.db.findByCloneUrl(cloneUrl))[0];
-        expect(event, "should be found").to.be.not.undefined;
-        expect((event as DBWebhookEvent).deleted, "should be marked as deleted").to.be.true;
+        const events = await this.db.findByCloneUrl(cloneUrl);
+        expect(events.length).to.be.eq(0);
     }
 }
 

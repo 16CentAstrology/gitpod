@@ -6,36 +6,52 @@ package preview
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
-	"github.com/cockroachdb/errors"
+	"cloud.google.com/go/storage"
 	"github.com/sirupsen/logrus"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"google.golang.org/api/option"
 
 	"github.com/gitpod-io/gitpod/previewctl/pkg/k8s"
 	"github.com/gitpod-io/gitpod/previewctl/pkg/k8s/context/k3s"
 )
 
+const TFStateBucket = "5d39183e-preview-tf-state"
+
 type Config struct {
-	branch    string
-	name      string
-	namespace string
+	branch string
+	name   string
 
 	status Status
 
-	previewClient   *k8s.Config
-	harvesterClient *k8s.Config
-	configLoader    *k3s.ConfigLoader
+	previewClient *k8s.Config
+	storageClient *storage.Client
+	configLoader  *k3s.ConfigLoader
 
 	logger *logrus.Entry
 
-	vmiCreationTime *metav1.Time
+	creationTime *time.Time
 }
 
-func New(branch string, logger *logrus.Logger) (*Config, error) {
+type Option func(opts *Config)
+
+func WithServiceAccountPath(serviceAccountPath string) Option {
+	return func(config *Config) {
+		if serviceAccountPath == "" {
+			return
+		}
+		storageClient, err := storage.NewClient(context.Background(), option.WithCredentialsFile(serviceAccountPath))
+		if err != nil {
+			return
+		}
+		config.storageClient = storageClient
+	}
+}
+
+func New(branch string, logger *logrus.Logger, opts ...Option) (*Config, error) {
 	branch, err := GetName(branch)
 	if err != nil {
 		return nil, err
@@ -43,22 +59,27 @@ func New(branch string, logger *logrus.Logger) (*Config, error) {
 
 	logEntry := logger.WithFields(logrus.Fields{"branch": branch})
 
-	harvesterConfig, err := k8s.NewFromDefaultConfigWithContext(logEntry.Logger, harvesterContextName)
-	if err != nil {
-		return nil, errors.Wrap(err, "couldn't instantiate a k8s config")
-	}
-
-	return &Config{
-		branch:    branch,
-		namespace: fmt.Sprintf("preview-%s", branch),
-		name:      branch,
+	config := &Config{
+		branch: branch,
+		name:   branch,
 		status: Status{
 			Name: branch,
 		},
-		harvesterClient: harvesterConfig,
-		logger:          logEntry,
-		vmiCreationTime: nil,
-	}, nil
+		logger:       logEntry,
+		creationTime: nil,
+	}
+	for _, o := range opts {
+		o(config)
+	}
+	if config.storageClient == nil {
+		config.storageClient, err = storage.NewClient(context.Background())
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return config, nil
+
 }
 
 // Same compares two preview environments
@@ -71,49 +92,37 @@ func (c *Config) Same(newPreview *Config) bool {
 		return false
 	}
 
-	c.ensureVMICreationTime()
-	newPreview.ensureVMICreationTime()
+	c.ensureCreationTime()
+	newPreview.ensureCreationTime()
 
-	return c.vmiCreationTime.Equal(newPreview.vmiCreationTime)
+	if c.creationTime == nil {
+		return false
+	}
+
+	return c.creationTime.Equal(*newPreview.creationTime)
 }
 
-func (c *Config) ensureVMICreationTime() {
+// ensureCreationTime best-effort guess on when the preview got created, based on the creation timestamp of the service
+func (c *Config) ensureCreationTime() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if c.vmiCreationTime == nil {
-		creationTime, err := c.harvesterClient.GetVMICreationTimestamp(ctx, c.name, c.namespace)
-		c.vmiCreationTime = creationTime
+	if c.creationTime == nil {
+		attr, err := c.storageClient.Bucket(TFStateBucket).Object("preview/" + c.name + ".tfstate").Attrs(ctx)
 		if err != nil {
 			c.logger.WithFields(logrus.Fields{"err": err}).Infof("Failed to get creation time")
+			return
 		}
+		c.creationTime = &attr.Created
 	}
-}
-
-func (c *Config) ListAllPreviews(ctx context.Context) error {
-	previews, err := c.harvesterClient.GetVMs(ctx)
-	if err != nil {
-		return err
-	}
-
-	for _, preview := range previews {
-		fmt.Printf("%v\n", preview)
-	}
-
-	return nil
-}
-
-func (c *Config) GetPreviewEnvironments(ctx context.Context) ([]string, error) {
-	return c.harvesterClient.GetVMs(ctx)
 }
 
 func (c *Config) GetName() string {
 	return c.name
 }
 
-func InstallVMSSHKeys() error {
-	// TODO: https://github.com/gitpod-io/ops/issues/6524
-	return exec.Command("bash", "/workspace/gitpod/dev/preview/util/install-vm-ssh-keys.sh").Run()
+func GenerateSSHPrivateKey(path string) error {
+	return exec.Command("ssh-keygen", "-t", "ed25519", "-q", "-N", "", "-f", path).Run()
 }
 
 func SSHPreview(branch string) error {
@@ -121,7 +130,9 @@ func SSHPreview(branch string) error {
 	if err != nil {
 		return err
 	}
-	sshCommand := exec.Command("bash", "/workspace/gitpod/dev/preview/ssh-vm.sh", "-b", branch)
+
+	path := filepath.Join(os.Getenv("LEEWAY_WORKSPACE_ROOT"), "dev/preview/ssh-vm.sh")
+	sshCommand := exec.Command("bash", path, "-b", branch)
 
 	// We need to bind standard output files to the command
 	// otherwise 'previewctl' will exit as soon as the script is run.

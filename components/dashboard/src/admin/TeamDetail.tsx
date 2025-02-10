@@ -6,7 +6,7 @@
 
 import dayjs from "dayjs";
 import { useEffect, useState } from "react";
-import { Team, TeamMemberInfo, TeamMemberRole } from "@gitpod/gitpod-protocol";
+import { Team, TeamMemberInfo, TeamMemberRole, VALID_ORG_MEMBER_ROLES } from "@gitpod/gitpod-protocol";
 import { getGitpodService } from "../service/service";
 import { Item, ItemField, ItemsList } from "../components/ItemsList";
 import DropDown from "../components/DropDown";
@@ -17,6 +17,9 @@ import { AttributionId } from "@gitpod/gitpod-protocol/lib/attribution";
 import { BillingMode } from "@gitpod/gitpod-protocol/lib/billing-mode";
 import { CostCenterJSON, CostCenter_BillingStrategy } from "@gitpod/gitpod-protocol/lib/usage";
 import Modal from "../components/Modal";
+import { Heading2 } from "../components/typography/headings";
+import search from "../icons/search.svg";
+import { Button } from "@podkit/buttons/Button";
 
 export default function TeamDetail(props: { team: Team }) {
     const { team } = props;
@@ -30,6 +33,7 @@ export default function TeamDetail(props: { team: Team }) {
     const [creditNote, setCreditNote] = useState<{ credits: number; note?: string }>({ credits: 0 });
     const [editAddCreditNote, setEditAddCreditNote] = useState<boolean>(false);
 
+    const attributionId = AttributionId.render(AttributionId.create(team));
     const initialize = () => {
         (async () => {
             const members = await getGitpodService().server.adminGetTeamMembers(team.id);
@@ -37,16 +41,12 @@ export default function TeamDetail(props: { team: Team }) {
                 setTeamMembers(members);
             }
         })();
-        getGitpodService()
-            .server.adminGetBillingMode(AttributionId.render({ kind: "team", teamId: team.id }))
-            .then((bm) => setBillingMode(bm));
-        const attributionId = AttributionId.render(AttributionId.create(team));
         getGitpodService().server.adminGetBillingMode(attributionId).then(setBillingMode);
         getGitpodService().server.adminGetCostCenter(attributionId).then(setCostCenter);
         getGitpodService().server.adminGetUsageBalance(attributionId).then(setUsageBalance);
     };
 
-    useEffect(initialize, [team]);
+    useEffect(initialize, [team, attributionId]);
 
     useEffect(() => {
         if (!costCenter) {
@@ -69,17 +69,17 @@ export default function TeamDetail(props: { team: Team }) {
     };
     return (
         <>
-            <div className="flex">
+            <div className="flex mt-8">
                 <div className="flex-1">
                     <div className="flex">
-                        <h3>{team.name}</h3>
+                        <Heading2>{team.name}</Heading2>
                         {team.markedDeleted && (
                             <span className="mt-2">
                                 <Label text="Deleted" color="red" />
                             </span>
                         )}
                     </div>
-                    <span className="mb-6 text-gray-400">/t/{team.slug}</span>
+                    <span className="mb-6 text-gray-400">{team.id}</span>
                     <span className="text-gray-400"> · </span>
                     <span className="text-gray-400">Created on {dayjs(team.creationTime).format("MMM D, YYYY")}</span>
                 </div>
@@ -133,17 +133,22 @@ export default function TeamDetail(props: { team: Team }) {
                     </Property>
                 )}
             </div>
-            <div className="flex mt-4">
-                <div className="flex">
-                    <div className="py-4">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 16 16" width="16" height="16">
-                            <path
-                                fill="#A8A29E"
-                                d="M6 2a4 4 0 100 8 4 4 0 000-8zM0 6a6 6 0 1110.89 3.477l4.817 4.816a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 010 6z"
-                            />
-                        </svg>
+            <div className="flex">
+                <div className="flex mt-3 pb-3">
+                    <div className="flex relative h-10 my-auto">
+                        <img
+                            src={search}
+                            title="Search"
+                            className="filter-grayscale absolute top-3 left-3"
+                            alt="search icon"
+                        />
+                        <input
+                            className="w-64 pl-9 border-0"
+                            type="search"
+                            placeholder="Search Members"
+                            onChange={(e) => setSearchText(e.target.value)}
+                        />
                     </div>
-                    <input type="search" placeholder="Search Members" onChange={(e) => setSearchText(e.target.value)} />
                 </div>
             </div>
 
@@ -157,9 +162,9 @@ export default function TeamDetail(props: { team: Team }) {
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" className="h-4 w-4" viewBox="0 0 16 16">
                             <path
                                 fill="#A8A29E"
-                                fill-rule="evenodd"
+                                fillRule="evenodd"
                                 d="M13.366 8.234a.8.8 0 010 1.132l-4.8 4.8a.8.8 0 01-1.132 0l-4.8-4.8a.8.8 0 111.132-1.132L7.2 11.67V2.4a.8.8 0 111.6 0v9.269l3.434-3.435a.8.8 0 011.132 0z"
-                                clip-rule="evenodd"
+                                clipRule="evenodd"
                             />
                         </svg>
                     </ItemField>
@@ -200,16 +205,10 @@ export default function TeamDetail(props: { team: Team }) {
                                     <DropDown
                                         customClasses="w-32"
                                         activeEntry={m.role}
-                                        entries={[
-                                            {
-                                                title: "owner",
-                                                onClick: () => setTeamMemberRole(m.userId, "owner"),
-                                            },
-                                            {
-                                                title: "member",
-                                                onClick: () => setTeamMemberRole(m.userId, "member"),
-                                            },
-                                        ]}
+                                        entries={VALID_ORG_MEMBER_ROLES.map((role) => ({
+                                            title: role,
+                                            onClick: () => setTeamMemberRole(m.userId, role),
+                                        }))}
                                     />
                                 </span>
                             </ItemField>
@@ -221,16 +220,12 @@ export default function TeamDetail(props: { team: Team }) {
                 visible={editSpendingLimit}
                 onClose={() => setEditSpendingLimit(false)}
                 title="Change Usage Limit"
-                onEnter={() => false}
                 buttons={[
-                    <button
+                    <Button
                         disabled={usageLimit === costCenter?.spendingLimit}
                         onClick={async () => {
                             if (usageLimit !== undefined) {
-                                await getGitpodService().server.adminSetUsageLimit(
-                                    AttributionId.render(AttributionId.create(team)),
-                                    usageLimit || 0,
-                                );
+                                await getGitpodService().server.adminSetUsageLimit(attributionId, usageLimit || 0);
                                 setUsageLimit(undefined);
                                 initialize();
                                 setEditSpendingLimit(false);
@@ -238,7 +233,7 @@ export default function TeamDetail(props: { team: Team }) {
                         }}
                     >
                         Change
-                    </button>,
+                    </Button>,
                 ]}
             >
                 <p className="pb-4 text-gray-500 text-base">Change the usage limit in credits per month.</p>
@@ -256,17 +251,16 @@ export default function TeamDetail(props: { team: Team }) {
                 </div>
             </Modal>
             <Modal
-                onEnter={() => false}
                 visible={editAddCreditNote}
                 onClose={() => setEditAddCreditNote(false)}
                 title="Add Credits"
                 buttons={[
-                    <button
+                    <Button
                         disabled={creditNote.credits === 0 || !creditNote.note}
                         onClick={async () => {
                             if (creditNote.credits !== 0 && !!creditNote.note) {
                                 await getGitpodService().server.adminAddUsageCreditNote(
-                                    AttributionId.render(AttributionId.create(team)),
+                                    attributionId,
                                     creditNote.credits,
                                     creditNote.note,
                                 );
@@ -277,7 +271,7 @@ export default function TeamDetail(props: { team: Team }) {
                         }}
                     >
                         Add Credits
-                    </button>,
+                    </Button>,
                 ]}
             >
                 <p>Adds or subtracts the amount of credits from this account.</p>

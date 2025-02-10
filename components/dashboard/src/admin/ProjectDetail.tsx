@@ -6,69 +6,60 @@
 
 import { Link } from "react-router-dom";
 import { Project } from "@gitpod/gitpod-protocol";
-import Prebuilds from "../projects/Prebuilds";
 import Property from "./Property";
 import dayjs from "dayjs";
+import { PrebuildsList } from "../prebuilds/list/PrebuildList";
+import { Heading2, Heading3, Subheading } from "@podkit/typography/Headings";
 
-export default function ProjectDetail(props: { project: Project; owner: string | undefined }) {
+type Props = {
+    project: Project;
+    owner?: string;
+};
+export default function ProjectDetail({ project, owner }: Props) {
     return (
-        <>
-            <div className="flex">
+        <div className="app-container">
+            <div className="flex mt-8">
                 <div className="flex-1">
                     <div className="flex">
-                        <h3>{props.project.name}</h3>
+                        <Heading2>{project.name}</Heading2>
                         <span className="my-auto"></span>
                     </div>
-                    <p>{props.project.cloneUrl}</p>
+                    <Subheading>{project.cloneUrl}</Subheading>
                 </div>
             </div>
             <div className="flex flex-col w-full">
                 <div className="flex w-full mt-6">
-                    <Property name="Created">{dayjs(props.project.creationTime).format("MMM D, YYYY")}</Property>
+                    <Property name="Created">{dayjs(project.creationTime).format("MMM D, YYYY")}</Property>
                     <Property name="Repository">
                         <a
                             className="text-blue-400 dark:text-blue-600 hover:text-blue-600 dark:hover:text-blue-400 truncate"
-                            href={props.project.cloneUrl}
+                            href={project.cloneUrl}
                         >
-                            {props.project.name}
+                            {project.name}
                         </a>
                     </Property>
-                    {props.project.userId ? (
-                        <Property name="Owner">
-                            <>
-                                <Link
-                                    className="text-blue-400 dark:text-blue-600 hover:text-blue-600 dark:hover:text-blue-400 truncate"
-                                    to={"/admin/users/" + props.project.userId}
-                                >
-                                    {props.owner}
-                                </Link>
-                                <span className="text-gray-400 dark:text-gray-500"> (User)</span>
-                            </>
-                        </Property>
-                    ) : (
-                        <Property name="Owner">
-                            <>
-                                <Link
-                                    className="text-blue-400 dark:text-blue-600 hover:text-blue-600 dark:hover:text-blue-400 truncate"
-                                    to={"/admin/teams/" + props.project.teamId}
-                                >
-                                    {props.owner}
-                                </Link>
-                                <span className="text-gray-400 dark:text-gray-500"> (Team)</span>
-                            </>
-                        </Property>
-                    )}
+                    <Property name="Owner">
+                        <Link
+                            className="text-blue-400 dark:text-blue-600 hover:text-blue-600 dark:hover:text-blue-400 truncate"
+                            to={"/admin/orgs/" + project.teamId}
+                        >
+                            {owner}
+                        </Link>
+                        <span className="text-gray-400 dark:text-gray-500"> (Organization)</span>
+                    </Property>
                 </div>
                 <div className="flex w-full mt-6">
-                    <Property name="Incremental Prebuilds">
-                        {props.project.settings?.useIncrementalPrebuilds ? "Yes" : "No"}
-                    </Property>
-                    <Property name="Marked Deleted">{props.project.markedDeleted ? "Yes" : "No"}</Property>
+                    <Property name="Marked Deleted">{project.markedDeleted ? "Yes" : "No"}</Property>
                 </div>
             </div>
             <div className="mt-6">
-                <Prebuilds project={props.project} isAdminDashboard={true} />
+                <Heading3 className="mb-4">Prebuilds</Heading3>
+                <PrebuildsList
+                    initialFilter={{ configurationId: project.id }}
+                    organizationId={project.teamId}
+                    hideOrgSpecificControls
+                />
             </div>
-        </>
+        </div>
     );
 }

@@ -1,0 +1,8 @@
+#cloud-config
+users:
+- name: ubuntu
+  sudo: "ALL=(ALL) NOPASSWD: ALL"
+chpasswd:
+  list: |
+    ubuntu:ubuntu
+  expire: False

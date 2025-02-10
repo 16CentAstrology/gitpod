@@ -1,4 +1,4 @@
-// Copyright (c) 2022 Gitpod GmbH. All rights reserved.
+// Copyright (c) 2024 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
 // See License.AGPL.txt in the project root for license information.
 
@@ -53,32 +53,77 @@ func local_request_ControlService_CreateSSHKeyPair_0(ctx context.Context, marsha
 
 }
 
+func request_ControlService_SendHeartBeat_0(ctx context.Context, marshaler runtime.Marshaler, client ControlServiceClient, req *http.Request, pathParams map[string]string) (proto.Message, runtime.ServerMetadata, error) {
+	var protoReq SendHeartBeatRequest
+	var metadata runtime.ServerMetadata
+
+	msg, err := client.SendHeartBeat(ctx, &protoReq, grpc.Header(&metadata.HeaderMD), grpc.Trailer(&metadata.TrailerMD))
+	return msg, metadata, err
+
+}
+
+func local_request_ControlService_SendHeartBeat_0(ctx context.Context, marshaler runtime.Marshaler, server ControlServiceServer, req *http.Request, pathParams map[string]string) (proto.Message, runtime.ServerMetadata, error) {
+	var protoReq SendHeartBeatRequest
+	var metadata runtime.ServerMetadata
+
+	msg, err := server.SendHeartBeat(ctx, &protoReq)
+	return msg, metadata, err
+
+}
+
 // RegisterControlServiceHandlerServer registers the http handlers for service ControlService to "mux".
 // UnaryRPC     :call ControlServiceServer directly.
 // StreamingRPC :currently unsupported pending https://github.com/grpc/grpc-go/issues/906.
 // Note that using this registration option will cause many gRPC library features to stop working. Consider using RegisterControlServiceHandlerFromEndpoint instead.
 func RegisterControlServiceHandlerServer(ctx context.Context, mux *runtime.ServeMux, server ControlServiceServer) error {
 
-	mux.Handle("POST", pattern_ControlService_CreateSSHKeyPair_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
+	mux.Handle("GET", pattern_ControlService_CreateSSHKeyPair_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
 		ctx, cancel := context.WithCancel(req.Context())
 		defer cancel()
 		var stream runtime.ServerTransportStream
 		ctx = grpc.NewContextWithServerTransportStream(ctx, &stream)
 		inboundMarshaler, outboundMarshaler := runtime.MarshalerForRequest(mux, req)
-		rctx, err := runtime.AnnotateIncomingContext(ctx, mux, req, "/supervisor.ControlService/CreateSSHKeyPair", runtime.WithHTTPPathPattern("/v1/sshkey/create"))
+		var err error
+		var annotatedContext context.Context
+		annotatedContext, err = runtime.AnnotateIncomingContext(ctx, mux, req, "/supervisor.ControlService/CreateSSHKeyPair", runtime.WithHTTPPathPattern("/v1/ssh_keys/create"))
 		if err != nil {
 			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
 			return
 		}
-		resp, md, err := local_request_ControlService_CreateSSHKeyPair_0(rctx, inboundMarshaler, server, req, pathParams)
+		resp, md, err := local_request_ControlService_CreateSSHKeyPair_0(annotatedContext, inboundMarshaler, server, req, pathParams)
 		md.HeaderMD, md.TrailerMD = metadata.Join(md.HeaderMD, stream.Header()), metadata.Join(md.TrailerMD, stream.Trailer())
-		ctx = runtime.NewServerMetadataContext(ctx, md)
+		annotatedContext = runtime.NewServerMetadataContext(annotatedContext, md)
 		if err != nil {
-			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
+			runtime.HTTPError(annotatedContext, mux, outboundMarshaler, w, req, err)
 			return
 		}
 
-		forward_ControlService_CreateSSHKeyPair_0(ctx, mux, outboundMarshaler, w, req, resp, mux.GetForwardResponseOptions()...)
+		forward_ControlService_CreateSSHKeyPair_0(annotatedContext, mux, outboundMarshaler, w, req, resp, mux.GetForwardResponseOptions()...)
+
+	})
+
+	mux.Handle("GET", pattern_ControlService_SendHeartBeat_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+		var stream runtime.ServerTransportStream
+		ctx = grpc.NewContextWithServerTransportStream(ctx, &stream)
+		inboundMarshaler, outboundMarshaler := runtime.MarshalerForRequest(mux, req)
+		var err error
+		var annotatedContext context.Context
+		annotatedContext, err = runtime.AnnotateIncomingContext(ctx, mux, req, "/supervisor.ControlService/SendHeartBeat", runtime.WithHTTPPathPattern("/v1/send_heartbeat"))
+		if err != nil {
+			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		resp, md, err := local_request_ControlService_SendHeartBeat_0(annotatedContext, inboundMarshaler, server, req, pathParams)
+		md.HeaderMD, md.TrailerMD = metadata.Join(md.HeaderMD, stream.Header()), metadata.Join(md.TrailerMD, stream.Trailer())
+		annotatedContext = runtime.NewServerMetadataContext(annotatedContext, md)
+		if err != nil {
+			runtime.HTTPError(annotatedContext, mux, outboundMarshaler, w, req, err)
+			return
+		}
+
+		forward_ControlService_SendHeartBeat_0(annotatedContext, mux, outboundMarshaler, w, req, resp, mux.GetForwardResponseOptions()...)
 
 	})
 
@@ -123,23 +168,47 @@ func RegisterControlServiceHandler(ctx context.Context, mux *runtime.ServeMux, c
 // "ControlServiceClient" to call the correct interceptors.
 func RegisterControlServiceHandlerClient(ctx context.Context, mux *runtime.ServeMux, client ControlServiceClient) error {
 
-	mux.Handle("POST", pattern_ControlService_CreateSSHKeyPair_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
+	mux.Handle("GET", pattern_ControlService_CreateSSHKeyPair_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
 		ctx, cancel := context.WithCancel(req.Context())
 		defer cancel()
 		inboundMarshaler, outboundMarshaler := runtime.MarshalerForRequest(mux, req)
-		rctx, err := runtime.AnnotateContext(ctx, mux, req, "/supervisor.ControlService/CreateSSHKeyPair", runtime.WithHTTPPathPattern("/v1/sshkey/create"))
+		var err error
+		var annotatedContext context.Context
+		annotatedContext, err = runtime.AnnotateContext(ctx, mux, req, "/supervisor.ControlService/CreateSSHKeyPair", runtime.WithHTTPPathPattern("/v1/ssh_keys/create"))
 		if err != nil {
 			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
 			return
 		}
-		resp, md, err := request_ControlService_CreateSSHKeyPair_0(rctx, inboundMarshaler, client, req, pathParams)
-		ctx = runtime.NewServerMetadataContext(ctx, md)
+		resp, md, err := request_ControlService_CreateSSHKeyPair_0(annotatedContext, inboundMarshaler, client, req, pathParams)
+		annotatedContext = runtime.NewServerMetadataContext(annotatedContext, md)
 		if err != nil {
-			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
+			runtime.HTTPError(annotatedContext, mux, outboundMarshaler, w, req, err)
 			return
 		}
 
-		forward_ControlService_CreateSSHKeyPair_0(ctx, mux, outboundMarshaler, w, req, resp, mux.GetForwardResponseOptions()...)
+		forward_ControlService_CreateSSHKeyPair_0(annotatedContext, mux, outboundMarshaler, w, req, resp, mux.GetForwardResponseOptions()...)
+
+	})
+
+	mux.Handle("GET", pattern_ControlService_SendHeartBeat_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+		inboundMarshaler, outboundMarshaler := runtime.MarshalerForRequest(mux, req)
+		var err error
+		var annotatedContext context.Context
+		annotatedContext, err = runtime.AnnotateContext(ctx, mux, req, "/supervisor.ControlService/SendHeartBeat", runtime.WithHTTPPathPattern("/v1/send_heartbeat"))
+		if err != nil {
+			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		resp, md, err := request_ControlService_SendHeartBeat_0(annotatedContext, inboundMarshaler, client, req, pathParams)
+		annotatedContext = runtime.NewServerMetadataContext(annotatedContext, md)
+		if err != nil {
+			runtime.HTTPError(annotatedContext, mux, outboundMarshaler, w, req, err)
+			return
+		}
+
+		forward_ControlService_SendHeartBeat_0(annotatedContext, mux, outboundMarshaler, w, req, resp, mux.GetForwardResponseOptions()...)
 
 	})
 
@@ -147,9 +216,13 @@ func RegisterControlServiceHandlerClient(ctx context.Context, mux *runtime.Serve
 }
 
 var (
-	pattern_ControlService_CreateSSHKeyPair_0 = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1, 2, 2}, []string{"v1", "sshkey", "create"}, ""))
+	pattern_ControlService_CreateSSHKeyPair_0 = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1, 2, 2}, []string{"v1", "ssh_keys", "create"}, ""))
+
+	pattern_ControlService_SendHeartBeat_0 = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1}, []string{"v1", "send_heartbeat"}, ""))
 )
 
 var (
 	forward_ControlService_CreateSSHKeyPair_0 = runtime.ForwardResponseMessage
+
+	forward_ControlService_SendHeartBeat_0 = runtime.ForwardResponseMessage
 )

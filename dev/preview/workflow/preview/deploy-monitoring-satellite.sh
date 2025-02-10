@@ -11,12 +11,10 @@ source "$(realpath "${SCRIPT_PATH}/../lib/common.sh")"
 # shellcheck source=../lib/k8s-util.sh
 source "$(realpath "${SCRIPT_PATH}/../lib/k8s-util.sh")"
 
-DEV_KUBE_PATH="${DEV_KUBE_PATH:-/home/gitpod/.kube/config}"
-DEV_KUBE_CONTEXT="${DEV_KUBE_CONTEXT:-dev}"
-
 PREVIEW_NAME="${PREVIEW_NAME:-$(previewctl get name)}"
-PREVIEW_K3S_KUBE_PATH="${PREVIEW_K3S_KUBECONFIG_PATH:-/home/gitpod/.kube/config}"
+PREVIEW_K3S_KUBE_PATH="${PREVIEW_K3S_KUBECONFIG_PATH:-$HOME/.kube/config}"
 PREVIEW_K3S_KUBE_CONTEXT="${PREVIEW_K3S_KUBE_CONTEXT:-$PREVIEW_NAME}"
+PREVIEW_GCP_PROJECT="gitpod-dev-preview"
 
 INITIAL_DEFAULT_NAMESPACE="$(kubens -c)"
 
@@ -41,7 +39,7 @@ kubectl \
 kubectl \
     --kubeconfig "${PREVIEW_K3S_KUBE_PATH}" \
     --context "${PREVIEW_K3S_KUBE_CONTEXT}" \
-    create ns certmanager --dry-run=client -o yaml \
+    create ns cert-manager --dry-run=client -o yaml \
 | kubectl \
     --kubeconfig "${PREVIEW_K3S_KUBE_PATH}" \
     --context "${PREVIEW_K3S_KUBE_CONTEXT}" \
@@ -60,9 +58,9 @@ fi
 GOBIN=$(pwd) go install github.com/gitpod-io/observability/installer@main
 mv installer observability-installer
 
-HONEYCOMB_API_KEY="$(readWerftSecret honeycomb-api-key apikey)" \
-PROM_REMOTE_WRITE_USER="$(readWerftSecret prometheus-remote-write-auth user)" \
-PROM_REMOTE_WRITE_PASSWORD="$(readWerftSecret prometheus-remote-write-auth password)" \
+HONEYCOMB_API_KEY="$(gcloud secrets versions access latest --secret="honeycomb-api-key" --project=${PREVIEW_GCP_PROJECT})" \
+PROM_REMOTE_WRITE_USER="$(gcloud secrets versions access latest --secret="prometheus-remote-write-auth" --project=${PREVIEW_GCP_PROJECT})" \
+PROM_REMOTE_WRITE_PASSWORD="$(gcloud secrets versions access latest --secret="prometheus-remote-write-auth-password" --project=${PREVIEW_GCP_PROJECT}))" \
 PREVIEW_NAME="${PREVIEW_NAME}" \
 WORKSPACE_ROOT="${ROOT}" \
 envsubst <"${ROOT}/dev/preview/workflow/config/monitoring-satellite.yaml" \
@@ -73,6 +71,9 @@ envsubst <"${ROOT}/dev/preview/workflow/config/monitoring-satellite.yaml" \
 # namespaces in depending on the environment. So we temporarily set the default namespace to monitoring-satellite
 echo "Setting default namespace to monitoring-satellite"
 kubens monitoring-satellite
+
+# remove PodSecurityPolicy rendered objects, we're using K3s 1.26, which doesn't support PSP anymore
+find "${manifests_dir}" -type f -iname "*PodSecurityPolicy*" -exec rm {} \;
 
 # we have to apply the CRDs first and wait until they are available before we can apply the rest
 find "${manifests_dir}" -name "*CustomResourceDefinition*" -exec kubectl --kubeconfig "${PREVIEW_K3S_KUBE_PATH}" --context "${PREVIEW_K3S_KUBE_CONTEXT}" apply -f {} --server-side \;

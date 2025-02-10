@@ -2,6 +2,7 @@ dist/
 components/*/lib/
 components/ee/*/lib/
 components/*/typescript/lib/
+components/*/typescript-*/lib/
 components/local-app-api/*/lib/
 components/supervisor/frontend/lib/
 src-gen/
@@ -30,6 +31,7 @@ components/versions/versions.json
 .helm-chart-release
 *.tgz
 
+
 # Symbolic links created by scripts for building docker images
 /.dockerignore
 
@@ -56,3 +58,6 @@ components/server/*.log
 
 # Jetbrains workspace files
 .idea/misc.xml
+
+# Local redis dump files
+dump.rdb

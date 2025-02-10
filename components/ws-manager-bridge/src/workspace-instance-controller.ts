@@ -6,25 +6,26 @@
 
 import { TraceContext } from "@gitpod/gitpod-protocol/lib/util/tracing";
 import { GetWorkspacesRequest } from "@gitpod/ws-manager/lib";
-import { DisposableCollection, RunningWorkspaceInfo, WorkspaceInstance } from "@gitpod/gitpod-protocol";
+import { Disposable, DisposableCollection, RunningWorkspaceInfo, WorkspaceInstance } from "@gitpod/gitpod-protocol";
 import { inject, injectable } from "inversify";
 import { Configuration } from "./config";
 import { log, LogContext } from "@gitpod/gitpod-protocol/lib/util/logging";
-import { PrometheusMetricsExporter } from "./prometheus-metrics-exporter";
+import { Metrics } from "./metrics";
 import { WorkspaceDB } from "@gitpod/gitpod-db/lib/workspace-db";
 import { DBWithTracing, TracedUserDB, TracedWorkspaceDB } from "@gitpod/gitpod-db/lib/traced-db";
 import { UserDB } from "@gitpod/gitpod-db/lib/user-db";
-import { MessageBusIntegration } from "./messagebus-integration";
-import { PrebuildUpdater } from "./prebuild-updater";
 import { IAnalyticsWriter } from "@gitpod/gitpod-protocol/lib/analytics";
 import { ClientProvider } from "./wsman-subscriber";
 import { repeat } from "@gitpod/gitpod-protocol/lib/util/repeat";
+import { PrebuildUpdater } from "./prebuild-updater";
+import { RedisPublisher } from "@gitpod/gitpod-db/lib";
+import { durationLongerThanSeconds } from "@gitpod/gitpod-protocol/lib/util/timeutil";
 
 export const WorkspaceInstanceController = Symbol("WorkspaceInstanceController");
 
-export interface WorkspaceInstanceController {
+export interface WorkspaceInstanceController extends Disposable {
     start(
-        installation: string,
+        workspaceClusterName: string,
         clientProvider: ClientProvider,
         controllerIntervalSeconds: number,
         controllerMaxDisconnectSeconds: number,
@@ -33,7 +34,7 @@ export interface WorkspaceInstanceController {
     controlNotStoppedAppClusterManagedInstanceTimeouts(
         parentCtx: TraceContext,
         runningInstances: RunningWorkspaceInfo[],
-        installation: string,
+        workspaceClusterName: string,
     ): Promise<void>;
 
     onStopped(ctx: TraceContext, ownerUserID: string, instance: WorkspaceInstance): Promise<void>;
@@ -46,31 +47,21 @@ export interface WorkspaceInstanceController {
  * !!! It's statful, so make sure it's bound in transient mode !!!
  */
 @injectable()
-export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceController {
-    @inject(Configuration) protected readonly config: Configuration;
-
-    @inject(PrometheusMetricsExporter)
-    protected readonly prometheusExporter: PrometheusMetricsExporter;
-
-    @inject(TracedWorkspaceDB)
-    protected readonly workspaceDB: DBWithTracing<WorkspaceDB>;
-
-    @inject(TracedUserDB)
-    protected readonly userDB: DBWithTracing<UserDB>;
-
-    @inject(MessageBusIntegration)
-    protected readonly messagebus: MessageBusIntegration;
-
-    @inject(PrebuildUpdater)
-    protected readonly prebuildUpdater: PrebuildUpdater;
-
-    @inject(IAnalyticsWriter)
-    protected readonly analytics: IAnalyticsWriter;
+export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceController, Disposable {
+    constructor(
+        @inject(Configuration) private readonly config: Configuration,
+        @inject(Metrics) private readonly prometheusExporter: Metrics,
+        @inject(TracedWorkspaceDB) private readonly workspaceDB: DBWithTracing<WorkspaceDB>,
+        @inject(TracedUserDB) private readonly userDB: DBWithTracing<UserDB>,
+        @inject(PrebuildUpdater) private readonly prebuildUpdater: PrebuildUpdater,
+        @inject(IAnalyticsWriter) private readonly analytics: IAnalyticsWriter,
+        @inject(RedisPublisher) private readonly publisher: RedisPublisher,
+    ) {}
 
     protected readonly disposables = new DisposableCollection();
 
     start(
-        installation: string,
+        workspaceClusterName: string,
         clientProvider: ClientProvider,
         controllerIntervalSeconds: number,
         controllerMaxDisconnectSeconds: number,
@@ -81,17 +72,17 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
                 const span = TraceContext.startSpan("controlInstances");
                 const ctx = { span };
                 try {
-                    log.debug("Controlling instances...", { installation });
+                    log.debug("Controlling instances...", { workspaceClusterName });
 
                     const nonStoppedInstances = await this.workspaceDB
                         .trace(ctx)
-                        .findRunningInstancesWithWorkspaces(installation, undefined, true);
+                        .findRunningInstancesWithWorkspaces(workspaceClusterName, undefined, true);
 
                     // Control running workspace instances against ws-manager
                     try {
                         await this.controlNonStoppedWSManagerManagedInstances(
                             ctx,
-                            installation,
+                            workspaceClusterName,
                             nonStoppedInstances,
                             clientProvider,
                             this.config.timeouts.pendingPhaseSeconds,
@@ -101,8 +92,8 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
                         disconnectStarted = Number.MAX_SAFE_INTEGER; // Reset disconnect period
                     } catch (err) {
                         if (durationLongerThanSeconds(disconnectStarted, controllerMaxDisconnectSeconds)) {
-                            log.warn("Error while controlling installation's workspaces", err, {
-                                installation,
+                            log.warn("Error while controlling workspace cluster's workspaces", err, {
+                                workspaceClusterName,
                             });
                         } else if (disconnectStarted > Date.now()) {
                             disconnectStarted = Date.now();
@@ -113,14 +104,14 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
                     await this.controlNotStoppedAppClusterManagedInstanceTimeouts(
                         ctx,
                         nonStoppedInstances,
-                        installation,
+                        workspaceClusterName,
                     );
 
-                    log.debug("Done controlling instances.", { installation });
+                    log.debug("Done controlling instances.", { workspaceClusterName });
                 } catch (err) {
                     TraceContext.setError(ctx, err);
-                    log.error("Error while controlling installation's workspaces", err, {
-                        installation,
+                    log.error("Error while controlling workspace cluster's workspaces", err, {
+                        workspaceClusterName,
                     });
                 } finally {
                     span.finish();
@@ -135,7 +126,7 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
      */
     protected async controlNonStoppedWSManagerManagedInstances(
         parentCtx: TraceContext,
-        installation: string,
+        workspaceClusterName: string,
         runningInstances: RunningWorkspaceInfo[],
         clientProvider: ClientProvider,
         pendingPhaseSeconds: number,
@@ -144,7 +135,7 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
         const span = TraceContext.startSpan("controlNonStoppedWSManagerManagedInstances", parentCtx);
         const ctx = { span };
         try {
-            log.debug("Controlling ws-manager managed instances...", { installation });
+            log.debug("Controlling ws-manager managed instances...", { workspaceClusterName });
 
             const runningInstancesIdx = new Map<string, RunningWorkspaceInfo>();
             runningInstances.forEach((i) => runningInstancesIdx.set(i.latestInstance.id, i));
@@ -173,7 +164,7 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
                     log.info(
                         { instanceId, workspaceId: instance.workspaceId },
                         "Database says the instance is present, but ws-man does not know about it. Marking as stopped in database.",
-                        { installation, phase },
+                        { workspaceClusterName, phase },
                     );
                     await this.markWorkspaceInstanceAsStopped(ctx, ri, new Date());
                     continue;
@@ -186,7 +177,7 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
                 });
             }
 
-            log.debug("Done controlling ws-manager managed instances.", { installation });
+            log.debug("Done controlling ws-manager managed instances.", { workspaceClusterName });
         } catch (err) {
             TraceContext.setError(ctx, err);
             throw err; // required by caller
@@ -204,21 +195,21 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
     async controlNotStoppedAppClusterManagedInstanceTimeouts(
         parentCtx: TraceContext,
         runningInstances: RunningWorkspaceInfo[],
-        installation: string,
+        applicationClusterName: string,
     ) {
         const span = TraceContext.startSpan("controlNotStoppedAppClusterManagedInstanceTimeouts", parentCtx);
         const ctx = { span };
         try {
-            log.debug("Controlling app cluster managed instances...", { installation });
+            log.debug("Controlling app cluster managed instances...", { applicationClusterName });
 
             await Promise.all(
                 runningInstances.map((info) => this.controlNotStoppedAppClusterManagedInstance(ctx, info)),
             );
 
-            log.debug("Done controlling app cluster managed instances.", { installation });
+            log.debug("Done controlling app cluster managed instances.", { applicationClusterName });
         } catch (err) {
             log.error("Error while controlling app cluster managed instances:", err, {
-                installation,
+                applicationClusterName,
             });
             TraceContext.setError(ctx, err);
         } finally {
@@ -281,7 +272,12 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
         // important: call this after the DB update
         await this.onStopped(ctx, info.workspace.ownerId, info.latestInstance);
 
-        await this.messagebus.notifyOnInstanceUpdate(ctx, info.workspace.ownerId, info.latestInstance);
+        await this.publisher.publishInstanceUpdate({
+            ownerID: info.workspace.ownerId,
+            instanceID: info.latestInstance.id,
+            workspaceID: info.workspace.id,
+        });
+
         await this.prebuildUpdater.stopPrebuildInstance(ctx, info.latestInstance);
     }
 
@@ -294,7 +290,14 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
                 userId: ownerUserID,
                 event: "workspace_stopped",
                 messageId: `bridge-wsstopped-${instance.id}`,
-                properties: { instanceId: instance.id, workspaceId: instance.workspaceId },
+                properties: {
+                    instanceId: instance.id,
+                    workspaceId: instance.workspaceId,
+                    stoppingTime: new Date(instance.stoppingTime!),
+                    conditions: instance.status.conditions,
+                    timeout: instance.status.timeout,
+                },
+                timestamp: new Date(instance.stoppedTime!),
             });
         } catch (err) {
             TraceContext.setError({ span }, err);
@@ -303,8 +306,8 @@ export class WorkspaceInstanceControllerImpl implements WorkspaceInstanceControl
             span.finish();
         }
     }
-}
 
-const durationLongerThanSeconds = (time: number, durationSeconds: number, now: number = Date.now()) => {
-    return (now - time) / 1000 > durationSeconds;
-};
+    public dispose() {
+        this.disposables.dispose();
+    }
+}

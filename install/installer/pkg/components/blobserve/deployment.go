@@ -27,7 +27,9 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 	if pointer.BoolDeref(ctx.Config.ContainerRegistry.InCluster, false) {
 		secretName = dockerregistry.BuiltInRegistryAuth
 	} else if ctx.Config.ContainerRegistry.External != nil {
-		secretName = ctx.Config.ContainerRegistry.External.Certificate.Name
+		if ctx.Config.ContainerRegistry.External.Certificate != nil {
+			secretName = ctx.Config.ContainerRegistry.External.Certificate.Name
+		}
 	} else {
 		return nil, fmt.Errorf("%s: invalid container registry config", Component)
 	}
@@ -75,25 +77,32 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 						}),
 					},
 					Spec: corev1.PodSpec{
-						Affinity:           common.NodeAffinity(cluster.AffinityLabelIDE),
-						ServiceAccountName: Component,
-						EnableServiceLinks: pointer.Bool(false),
-						Volumes: []corev1.Volume{{
-							Name:         "cache",
-							VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-						}, {
-							Name: "config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{Name: Component},
+						Affinity:                  cluster.WithNodeAffinityHostnameAntiAffinity(Component, cluster.AffinityLabelIDE),
+						TopologySpreadConstraints: cluster.WithHostnameTopologySpread(Component),
+						ServiceAccountName:        Component,
+						EnableServiceLinks:        pointer.Bool(false),
+						Volumes: []corev1.Volume{
+							{
+								Name:         "cache",
+								VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+							}, {
+								Name: "config",
+								VolumeSource: corev1.VolumeSource{
+									ConfigMap: &corev1.ConfigMapVolumeSource{
+										LocalObjectReference: corev1.LocalObjectReference{Name: Component},
+									},
+								},
+							}, {
+								Name: volumeName,
+								VolumeSource: corev1.VolumeSource{
+									Secret: &corev1.SecretVolumeSource{
+										SecretName: secretName,
+										Items:      []corev1.KeyToPath{{Key: ".dockerconfigjson", Path: "pull-secret.json"}},
+									},
 								},
 							},
-						}, {
-							Name: volumeName,
-							VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-								SecretName: secretName,
-							}},
-						}},
+							common.CAVolume(),
+						},
 						Containers: []corev1.Container{{
 							Name:            Component,
 							Args:            []string{"run", "/mnt/config/config.json"},
@@ -117,18 +126,20 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 								common.DefaultEnv(&ctx.Config),
 								common.WorkspaceTracingEnv(ctx, Component),
 							)),
-							VolumeMounts: []corev1.VolumeMount{{
-								Name:      "config",
-								MountPath: "/mnt/config",
-								ReadOnly:  true,
-							}, {
-								Name:      "cache",
-								MountPath: "/mnt/cache",
-							}, {
-								Name:      volumeName,
-								MountPath: "/mnt/pull-secret.json",
-								SubPath:   ".dockerconfigjson",
-							}},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "config",
+									MountPath: "/mnt/config",
+									ReadOnly:  true,
+								}, {
+									Name:      "cache",
+									MountPath: "/mnt/cache",
+								}, {
+									Name:      volumeName,
+									MountPath: "/mnt/pull-secret",
+								},
+								common.CAVolumeMount(),
+							},
 
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{

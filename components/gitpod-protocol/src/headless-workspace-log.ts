@@ -26,13 +26,15 @@ export namespace HeadlessWorkspaceEventType {
 
 export interface HeadlessWorkspaceEvent {
     workspaceID: string;
-    text: string;
     type: HeadlessWorkspaceEventType;
 }
 
 export interface HeadlessLogUrls {
     // A map of id to URL
     streams: { [streamID: string]: string };
+
+    // Whether the workspace is online
+    online?: boolean;
 }
 
 /** cmp. @const HEADLESS_LOG_STREAM_STATUS_CODE_REGEX */

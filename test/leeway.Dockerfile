@@ -2,7 +2,7 @@
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM alpine:3.16
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:1ec3327af43d7af231ffe475aff88d49dbb5e09af9f28610e6afbd2cb096e751
 
 # Ensure latest packages are present, like security updates.
 RUN  apk upgrade --no-cache \
@@ -12,12 +12,9 @@ RUN  apk upgrade --no-cache \
     curl \
     jq
 
-# convenience scripting tools
-RUN apk add --no-cache bash moreutils
-
 # deps for tests to run
-RUN curl -fsSL "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl \
-  && chmod +x /usr/local/bin/kubectl
+RUN curl -fsSL "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl" -o /usr/bin/kubectl \
+  && chmod +x /usr/bin/kubectl
 
 COPY test--app/bin /tests
 ENV PATH=$PATH:/tests

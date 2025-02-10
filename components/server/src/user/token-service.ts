@@ -4,64 +4,153 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { injectable, inject, postConstruct } from "inversify";
+import { injectable, inject } from "inversify";
 import { Token, Identity, User, TokenEntry } from "@gitpod/gitpod-protocol";
 import { HostContextProvider } from "../auth/host-context-provider";
 import { UserDB } from "@gitpod/gitpod-db/lib";
 import { v4 as uuidv4 } from "uuid";
 import { TokenProvider } from "./token-provider";
-import { TokenGarbageCollector } from "./token-garbage-collector";
+import { ApplicationError, ErrorCodes } from "@gitpod/gitpod-protocol/lib/messaging/error";
+import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
+import { RedisMutex } from "../redis/mutex";
+import {
+    OpportunisticRefresh,
+    reportScmTokenRefreshRequest,
+    scmTokenRefreshLatencyHistogram,
+} from "../prometheus-metrics";
 
 @injectable()
 export class TokenService implements TokenProvider {
     static readonly GITPOD_AUTH_PROVIDER_ID = "Gitpod";
-    static readonly GITPOD_PORT_AUTH_TOKEN_EXPIRY_MILLIS = 30 * 60 * 1000;
+    /**
+     * [mins]
+     *
+     * The default lifetime of a token if not specified otherwise.
+     * Atm we only specify a different lifetime on workspace starts (for the token we pass to "git clone" during content init).
+     * Also, this value is relevant for "opportunistic token refreshes" (enabled for Bitbucket only atm): It's the time we mark a token as "reserved" (= do not opportunistically refresh it).
+     */
+    static readonly DEFAULT_LIFETIME = 5;
 
     @inject(HostContextProvider) protected readonly hostContextProvider: HostContextProvider;
-    @inject(TokenGarbageCollector) protected readonly tokenGC: TokenGarbageCollector;
     @inject(UserDB) protected readonly userDB: UserDB;
+    @inject(RedisMutex) private readonly redisMutex: RedisMutex;
 
-    @postConstruct()
-    init() {
-        /** no await */ this.tokenGC.start().catch((err) => {
-            /** ignore */
-        });
+    async getTokenForHost(
+        user: User | string,
+        host: string,
+        requestedLifetimeMins?: number,
+    ): Promise<Token | undefined> {
+        const userId = User.is(user) ? user.id : user;
+
+        return this.doGetTokenForHost(userId, host, requestedLifetimeMins);
     }
 
-    protected getTokenForHostCache = new Map<string, Promise<Token>>();
-
-    async getTokenForHost(user: User, host: string): Promise<Token> {
-        // (AT) when it comes to token renewal, the awaited http requests may
-        // cause "parallel" calls to repeat the renewal, which will fail.
-        // Caching for pending operations should solve this issue.
-        const key = `${host}-${user.id}`;
-        let promise = this.getTokenForHostCache.get(key);
-        if (!promise) {
-            promise = this.doGetTokenForHost(user, host);
-            this.getTokenForHostCache.set(key, promise);
-            promise = promise.finally(() => this.getTokenForHostCache.delete(key));
+    private async doGetTokenForHost(
+        userId: string,
+        host: string,
+        requestedLifetimeMins = TokenService.DEFAULT_LIFETIME,
+    ): Promise<Token | undefined> {
+        const user = await this.userDB.findUserById(userId);
+        if (!user) {
+            throw new ApplicationError(ErrorCodes.NOT_FOUND, `User (${userId}) not found.`);
         }
-        return promise;
-    }
-
-    async doGetTokenForHost(user: User, host: string): Promise<Token> {
         const identity = this.getIdentityForHost(user, host);
-        let token = await this.userDB.findTokenForIdentity(identity);
-        if (!token) {
-            throw new Error(
-                `No token found for user ${identity.authProviderId}/${identity.authId}/${identity.authName}!`,
-            );
+
+        function isValidUntil(t: Token, requestedLifetimeDate: Date): boolean {
+            return !t.expiryDate || t.expiryDate >= requestedLifetimeDate.toISOString();
         }
-        const aboutToExpireTime = new Date();
-        aboutToExpireTime.setTime(aboutToExpireTime.getTime() + 5 * 60 * 1000);
-        if (token.expiryDate && token.expiryDate < aboutToExpireTime.toISOString()) {
-            const { authProvider } = this.hostContextProvider.get(host)!;
-            if (authProvider.refreshToken) {
-                await authProvider.refreshToken(user);
-                token = (await this.userDB.findTokenForIdentity(identity))!;
+
+        const updateReservation = async (uid: string, token: Token, requestedLifetimeDate: Date): Promise<void> => {
+            if (
+                !token.reservedUntilDate ||
+                requestedLifetimeDate.getTime() > new Date(token.reservedUntilDate).getTime()
+            ) {
+                // If the requested lifetime is longer than the reserved lifetime, we extend the reservation
+                const reservedUntilDate = requestedLifetimeDate.toISOString();
+                await this.userDB.updateTokenEntry({
+                    uid,
+                    reservedUntilDate,
+                });
+                token.reservedUntilDate = reservedUntilDate;
             }
+        };
+
+        const requestedLifetimeDate = nowPlusMins(requestedLifetimeMins);
+        let opportunisticRefresh: OpportunisticRefresh = "false";
+        try {
+            const refreshedToken = await this.redisMutex.using(
+                [`token-refresh-${host}-${userId}`],
+                3000, // After 3s without extension the lock is released
+                async () => {
+                    // Check: Current token so we can actually refresh?
+                    const tokenEntry = await this.userDB.findTokenEntryForIdentity(identity);
+                    const token = tokenEntry?.token;
+                    if (!token) {
+                        reportScmTokenRefreshRequest(host, opportunisticRefresh, "no_token");
+                        return undefined;
+                    }
+
+                    const { authProvider } = this.hostContextProvider.get(host)!;
+                    if (isValidUntil(token, requestedLifetimeDate)) {
+                        const doOpportunisticRefresh =
+                            !!authProvider.requiresOpportunisticRefresh && authProvider.requiresOpportunisticRefresh();
+                        if (!doOpportunisticRefresh) {
+                            // No opportunistic refresh? Update reservation and we are done.
+                            await updateReservation(tokenEntry.uid, token, requestedLifetimeDate);
+                            reportScmTokenRefreshRequest(host, opportunisticRefresh, "still_valid");
+                            return token;
+                        }
+
+                        // Opportunistic, but token currently reserved? Done.
+                        const currentlyReserved =
+                            token.reservedUntilDate &&
+                            new Date(token.reservedUntilDate).getTime() > new Date().getTime();
+                        if (currentlyReserved) {
+                            await updateReservation(tokenEntry.uid, token, requestedLifetimeDate);
+                            reportScmTokenRefreshRequest(host, "reserved", "still_valid");
+                            return token;
+                        }
+                        opportunisticRefresh = "true";
+                    }
+                    // Not valid, or we need to refresh anyway
+
+                    if (!authProvider.refreshToken) {
+                        reportScmTokenRefreshRequest(host, opportunisticRefresh, "not_refreshable");
+                        return undefined;
+                    }
+
+                    // Perform actual refresh
+                    const stopTimer = scmTokenRefreshLatencyHistogram.startTimer({ host });
+                    try {
+                        const result = await authProvider.refreshToken(user, requestedLifetimeDate);
+                        reportScmTokenRefreshRequest(host, opportunisticRefresh, "success");
+                        return result;
+                    } finally {
+                        stopTimer({ host });
+                    }
+                },
+                { retryCount: 20, retryDelay: 500 }, // We wait at most 10s until we give up, and conclude that we can't refresh the token now.
+            );
+            return refreshedToken;
+        } catch (err) {
+            if (RedisMutex.isLockedError(err)) {
+                // In this case we already timed-out. BUT there is a high chance we are waiting on somebody else, who might already done the work for us.
+                // So just checking again here
+                const tokenEntry = await this.userDB.findTokenEntryForIdentity(identity);
+                const token = tokenEntry?.token;
+                if (token && isValidUntil(token, requestedLifetimeDate)) {
+                    log.debug({ userId }, `Token refresh timed out, but still successful`, { host });
+                    reportScmTokenRefreshRequest(host, opportunisticRefresh, "success_after_timeout");
+                    return token;
+                }
+
+                log.error({ userId }, `Failed to refresh token (timeout waiting on lock)`, err, { host });
+                reportScmTokenRefreshRequest(host, opportunisticRefresh, "timeout");
+                throw new Error(`Failed to refresh token (timeout waiting on lock)`);
+            }
+            reportScmTokenRefreshRequest(host, opportunisticRefresh, "error");
+            throw err;
         }
-        return token;
     }
 
     async getOrCreateGitpodIdentity(user: User): Promise<Identity> {
@@ -93,52 +182,26 @@ export class TokenService implements TokenProvider {
         return await this.userDB.addToken(identity, token);
     }
 
-    /**
-     * Currently this methods creates a new Token with every call.
-     * This relies on two things:
-     *  - the frontends to not request too many tokens (puts load on the DB)
-     *  - the TokenGarbageCollector to cleanup expired tokens
-     * @param user
-     * @param workspaceId
-     */
-    async getFreshPortAuthenticationToken(user: User, workspaceId: string): Promise<Token> {
-        const newPortAuthToken = (): Token => {
-            return {
-                value: uuidv4(),
-                scopes: [TokenService.generateWorkspacePortAuthScope(workspaceId)],
-                updateDate: new Date().toISOString(),
-                expiryDate: new Date(Date.now() + TokenService.GITPOD_PORT_AUTH_TOKEN_EXPIRY_MILLIS).toISOString(),
-            };
-        };
-
-        const identity = await this.getOrCreateGitpodIdentity(user);
-        const token = newPortAuthToken();
-        const tokenEntry = await this.userDB.addToken(identity, token);
-        // The following necessary to allow fast retrieval.
-        // TODO: Move tokens like this into a separate data store
-        tokenEntry.token.value = tokenEntry.uid;
-        await this.userDB.updateTokenEntry(tokenEntry);
-        return token;
-    }
-
-    protected getIdentityForHost(user: User, host: string): Identity {
+    private getIdentityForHost(user: User, host: string): Identity {
         const authProviderId = this.getAuthProviderId(host);
         const hostIdentity = authProviderId && User.getIdentity(user, authProviderId);
         if (!hostIdentity) {
-            throw new Error(`User ${user.name} has no identity for host: ${host}!`);
+            throw new ApplicationError(ErrorCodes.NOT_FOUND, `User (${user.id}) has no identity for host: ${host}.`);
         }
         return hostIdentity;
     }
 
-    protected getAuthProviderId(host: string): string | undefined {
+    private getAuthProviderId(host: string): string | undefined {
         const hostContext = this.hostContextProvider.get(host);
         if (!hostContext) {
             return undefined;
         }
         return hostContext.authProvider.authProviderId;
     }
+}
 
-    public static generateWorkspacePortAuthScope(workspaceId: string): string {
-        return `access/workspace/${workspaceId}/port/*`;
-    }
+function nowPlusMins(mins: number): Date {
+    const now = new Date();
+    now.setTime(now.getTime() + mins * 60 * 1000);
+    return now;
 }

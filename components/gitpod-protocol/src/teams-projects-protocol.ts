@@ -4,42 +4,86 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { PrebuiltWorkspaceState, WorkspaceClasses } from "./protocol";
+import { PrebuiltWorkspaceState, Workspace, WorkspaceClasses } from "./protocol";
 import { v4 as uuidv4 } from "uuid";
 import { DeepPartial } from "./util/deep-partial";
-import { WebhookEvent } from "./webhook-event";
+import { WorkspaceInstance } from "./workspace-instance";
 
 export interface ProjectConfig {
     ".gitpod.yml": string;
 }
 
 export interface ProjectSettings {
-    useIncrementalPrebuilds?: boolean;
-    keepOutdatedPrebuildsRunning?: boolean;
-    // whether new workspaces can start on older prebuilds and incrementally update
-    allowUsingPreviousPrebuilds?: boolean;
-    // how many commits in the commit history a prebuild is good (undefined and 0 means every commit is prebuilt)
-    prebuildEveryNthCommit?: number;
+    /**
+     * Controls settings of prebuilds for this project.
+     */
+    prebuilds?: PrebuildSettings;
+
     // preferred workspace classes
     workspaceClasses?: WorkspaceClasses;
+
+    /**
+     * Controls workspace class restriction for this project, the list is a NOT ALLOW LIST. Empty array to allow all kind of workspace classes
+     */
+    restrictedWorkspaceClasses?: string[];
+
+    restrictedEditorNames?: string[];
+}
+export namespace PrebuildSettings {
+    export type BranchStrategy = "default-branch" | "all-branches" | "matched-branches";
+    export type TriggerStrategy = "activity-based" | "webhook-based";
+    export interface CloneSettings {
+        fullClone?: boolean;
+    }
+}
+
+export interface PrebuildSettings {
+    enable?: boolean;
+
+    /**
+     * Defines an interval of commits to run new prebuilds for. Defaults to 20
+     */
+    prebuildInterval?: number;
+
+    /**
+     * Which branches to consider to run new prebuilds on. Default to "all-branches"
+     */
+    branchStrategy?: PrebuildSettings.BranchStrategy;
+    /**
+     * If `branchStrategy` s set to "matched-branches", this should define a glob-pattern to be used
+     * to match the branch to run new prebuilds on. Defaults to "**"
+     */
+    branchMatchingPattern?: string;
+
+    /**
+     * Preferred workspace class for prebuilds.
+     */
+    workspaceClass?: string;
+
+    /**
+     * The activation strategy for prebuilds. Defaults to "webhook-based"
+     */
+    triggerStrategy?: PrebuildSettings.TriggerStrategy;
+
+    cloneSettings?: PrebuildSettings.CloneSettings;
 }
 
 export interface Project {
     id: string;
     name: string;
-    slug?: string;
     cloneUrl: string;
-    teamId?: string;
-    userId?: string;
+    teamId: string;
     appInstallationId: string;
     settings?: ProjectSettings;
     creationTime: string;
-    /** This is a flag that triggers the HARD DELETION of this entity */
-    deleted?: boolean;
     markedDeleted?: boolean;
 }
 
 export namespace Project {
+    export function is(data?: any): data is Project {
+        return typeof data === "object" && ["id", "name", "cloneUrl", "teamId"].every((p) => p in data);
+    }
+
     export const create = (project: Omit<Project, "id" | "creationTime">): Project => {
         return {
             ...project,
@@ -47,6 +91,36 @@ export namespace Project {
             creationTime: new Date().toISOString(),
         };
     };
+
+    export type PrebuildSettingsWithDefaults = Required<Pick<PrebuildSettings, "prebuildInterval">> & PrebuildSettings;
+
+    export const PREBUILD_SETTINGS_DEFAULTS: PrebuildSettingsWithDefaults = {
+        enable: false,
+        branchMatchingPattern: "**",
+        prebuildInterval: 20,
+        branchStrategy: "all-branches",
+        triggerStrategy: "activity-based",
+    };
+
+    /**
+     * Returns effective prebuild settings for the given project. The resulting settings
+     * contain default values for properties which are not set explicitly for this project.
+     */
+    export function getPrebuildSettings(project: Project): PrebuildSettingsWithDefaults {
+        // ignoring persisted properties with `undefined` values to exclude them from the override.
+        const overrides = Object.fromEntries(
+            Object.entries(project.settings?.prebuilds ?? {}).filter(([_, value]) => value !== undefined),
+        );
+
+        return {
+            ...PREBUILD_SETTINGS_DEFAULTS,
+            ...overrides,
+        };
+    }
+
+    export function hasPrebuildSettings(project: Project) {
+        return !(typeof project.settings?.prebuilds === "undefined");
+    }
 
     export interface Overview {
         branches: BranchDetails[];
@@ -73,6 +147,8 @@ export namespace Project {
         changeUrl?: string;
         changeHash: string;
     }
+
+    export type Visibility = "public" | "org-public" | "private";
 }
 
 export type PartialProject = DeepPartial<Project> & Pick<Project, "id">;
@@ -85,6 +161,8 @@ export interface ProjectUsage {
 export interface PrebuildWithStatus {
     info: PrebuildInfo;
     status: PrebuiltWorkspaceState;
+    workspace: Workspace;
+    instance?: WorkspaceInstance;
     error?: string;
 }
 
@@ -125,25 +203,90 @@ export interface StartPrebuildResult {
     wsid: string;
     done: boolean;
 }
-export interface Team {
+
+// alias for backwards compatibility
+export type Team = Organization;
+export interface Organization {
     id: string;
     name: string;
-    slug: string;
+    slug?: string;
     creationTime: string;
     markedDeleted?: boolean;
-    /** This is a flag that triggers the HARD DELETION of this entity */
-    deleted?: boolean;
 }
 
-export type TeamMemberRole = "owner" | "member";
+export interface OrganizationSettings {
+    workspaceSharingDisabled?: boolean;
+    // null or empty string to reset to default
+    defaultWorkspaceImage?: string | null;
 
-export interface TeamMemberInfo {
+    // empty array to allow all kind of workspace classes
+    allowedWorkspaceClasses?: string[] | null;
+
+    pinnedEditorVersions?: { [key: string]: string } | null;
+
+    restrictedEditorNames?: string[] | null;
+
+    // what role new members will get, default is "member"
+    defaultRole?: OrgMemberRole;
+
+    // the default organization-wide timeout settings for workspaces
+    timeoutSettings?: TimeoutSettings;
+
+    roleRestrictions?: RoleRestrictions;
+
+    // max number of parallel running workspaces per user
+    maxParallelRunningWorkspaces?: number;
+
+    // onboarding settings for the organization
+    onboardingSettings?: OnboardingSettings;
+
+    // whether to add a special annotation to commits that are created through Gitpod
+    annotateGitCommits?: boolean;
+}
+
+export type TimeoutSettings = {
+    // default per-org workspace timeout
+    inactivity?: string;
+
+    // If this field is true, workspaces neither a) pick up user-defined workspace timeouts, nor b) members can set custom timeouts during workspace runtime.
+    denyUserTimeouts?: boolean;
+};
+
+export const VALID_ORG_MEMBER_ROLES = ["owner", "member", "collaborator"] as const;
+
+export type TeamMemberRole = OrgMemberRole;
+export type OrgMemberRole = typeof VALID_ORG_MEMBER_ROLES[number];
+
+export type OrgMemberPermission = "start_arbitrary_repositories";
+export type RoleRestrictions = Partial<Record<OrgMemberRole, OrgMemberPermission[]>>;
+
+export namespace TeamMemberRole {
+    export function isValid(role: unknown): role is TeamMemberRole {
+        return VALID_ORG_MEMBER_ROLES.includes(role as TeamMemberRole);
+    }
+}
+
+export interface OnboardingSettings {
+    /**
+     * the link to an internal onboarding page for the organization, possibly featuring a custom onboarding guide and other resources
+     */
+    internalLink?: string;
+
+    /**
+     * the repository IDs of the repositories that are recommended for members to start with
+     */
+    recommendedRepositories?: string[];
+}
+
+export type TeamMemberInfo = OrgMemberInfo;
+export interface OrgMemberInfo {
     userId: string;
     fullName?: string;
     primaryEmail?: string;
     avatarUrl?: string;
     role: TeamMemberRole;
     memberSince: string;
+    ownedByOrganization: boolean;
 }
 
 export interface TeamMembershipInvite {
@@ -156,16 +299,4 @@ export interface TeamMembershipInvite {
 
     /** This is a flag that triggers the HARD DELETION of this entity */
     deleted?: boolean;
-}
-
-export interface PrebuildEvent {
-    id: string;
-    creationTime: string;
-    status: WebhookEvent.Status | WebhookEvent.PrebuildStatus;
-    message?: string;
-    prebuildId?: string;
-    projectId?: string;
-    cloneUrl?: string;
-    branch?: string;
-    commit?: string;
 }

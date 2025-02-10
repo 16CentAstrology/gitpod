@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -110,9 +111,16 @@ func (ws *GitInitializer) Run(ctx context.Context, mappings []archive.IDMapping)
 			return err
 		}
 
+		// we can only do `git config` stuffs after having a directory that is also git init'd
+		// commit-graph after every git fetch command that downloads a pack-file from a remote
+		err = ws.Git(ctx, "config", "fetch.writeCommitGraph", "true")
+		if err != nil {
+			log.WithError(err).WithField("location", ws.Location).Error("cannot configure fetch.writeCommitGraph")
+		}
+
 		err = ws.Git(ctx, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 		if err != nil {
-			log.WithError(err).WithField("location", ws.Location).Error("cannot configure fecth behavior")
+			log.WithError(err).WithField("location", ws.Location).Error("cannot configure fetch behavior")
 		}
 
 		err = ws.Git(ctx, "config", "--replace-all", "checkout.defaultRemote", "origin")
@@ -192,6 +200,20 @@ func (ws *GitInitializer) Run(ctx context.Context, mappings []archive.IDMapping)
 	return
 }
 
+func (ws *GitInitializer) isShallowRepository(ctx context.Context) bool {
+	out, err := ws.GitWithOutput(ctx, nil, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		log.WithError(err).Error("unexpected error checking if git repository is shallow")
+		return true
+	}
+	isShallow, err := strconv.ParseBool(strings.TrimSpace(string(out)))
+	if err != nil {
+		log.WithError(err).WithField("input", string(out)).Error("unexpected error parsing bool")
+		return true
+	}
+	return isShallow
+}
+
 // realizeCloneTarget ensures the clone target is checked out
 func (ws *GitInitializer) realizeCloneTarget(ctx context.Context) (err error) {
 	//nolint:ineffassign
@@ -228,8 +250,13 @@ func (ws *GitInitializer) realizeCloneTarget(ctx context.Context) (err error) {
 		//
 		// We don't recurse submodules because callers realizeCloneTarget() are expected to update submodules explicitly,
 		// and deal with any error appropriately (i.e. emit a warning rather than fail).
-		if err := ws.Git(ctx, "fetch", "--depth=1", "origin", "--recurse-submodules=no", ws.CloneTarget); err != nil {
-			log.WithError(err).WithField("remoteURI", ws.RemoteURI).WithField("branch", ws.CloneTarget).Error("Cannot fetch remote branch")
+		fetchArgs := []string{"--depth=1", "origin", "--recurse-submodules=no", ws.CloneTarget}
+		isShallow := ws.isShallowRepository(ctx)
+		if !isShallow {
+			fetchArgs = []string{"origin", "--recurse-submodules=no", ws.CloneTarget}
+		}
+		if err := ws.Git(ctx, "fetch", fetchArgs...); err != nil {
+			log.WithError(err).WithField("isShallow", isShallow).WithField("remoteURI", ws.RemoteURI).WithField("branch", ws.CloneTarget).Error("Cannot fetch remote branch")
 			return err
 		}
 

@@ -11,9 +11,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/gitpod-io/gitpod/common-go/log"
-	supervisor_helper "github.com/gitpod-io/gitpod/gitpod-cli/pkg/supervisor-helper"
-	supervisor "github.com/gitpod-io/gitpod/supervisor/api"
+	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/gitpod"
+	"github.com/gitpod-io/gitpod/supervisor/api"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 )
@@ -27,46 +26,41 @@ var infoCmdOpts struct {
 var infoCmd = &cobra.Command{
 	Use:   "info",
 	Short: "Display workspace info, such as its ID, class, etc.",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 		defer cancel()
 
-		conn, err := supervisor_helper.Dial(ctx)
+		wsInfo, err := gitpod.GetWSInfo(ctx)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
-		defer conn.Close()
-
-		wsInfo, err := supervisor_helper.FetchInfo(ctx, conn)
 
 		data := &infoData{
-			WorkspaceId:    wsInfo.WorkspaceId,
-			InstanceId:     wsInfo.InstanceId,
-			WorkspaceClass: wsInfo.WorkspaceClass,
-			WorkspaceUrl:   wsInfo.WorkspaceUrl,
-			ClusterHost:    wsInfo.WorkspaceClusterHost,
-		}
-
-		if err != nil {
-			log.Fatal(err)
+			WorkspaceId:         wsInfo.WorkspaceId,
+			InstanceId:          wsInfo.InstanceId,
+			WorkspaceClass:      wsInfo.WorkspaceClass,
+			WorkspaceUrl:        wsInfo.WorkspaceUrl,
+			WorkspaceContextUrl: wsInfo.WorkspaceContextUrl,
+			ClusterHost:         wsInfo.WorkspaceClusterHost,
 		}
 
 		if infoCmdOpts.Json {
 			content, _ := json.Marshal(data)
 			fmt.Println(string(content))
-			return
+			return nil
 		}
-
 		outputInfo(data)
+		return nil
 	},
 }
 
 type infoData struct {
-	WorkspaceId    string                                           `json:"workspace_id"`
-	InstanceId     string                                           `json:"instance_id"`
-	WorkspaceClass *supervisor.WorkspaceInfoResponse_WorkspaceClass `json:"workspace_class"`
-	WorkspaceUrl   string                                           `json:"workspace_url"`
-	ClusterHost    string                                           `json:"cluster_host"`
+	WorkspaceId         string                                    `json:"workspace_id"`
+	InstanceId          string                                    `json:"instance_id"`
+	WorkspaceClass      *api.WorkspaceInfoResponse_WorkspaceClass `json:"workspace_class"`
+	WorkspaceUrl        string                                    `json:"workspace_url"`
+	WorkspaceContextUrl string                                    `json:"workspace_context_url"`
+	ClusterHost         string                                    `json:"cluster_host"`
 }
 
 func outputInfo(info *infoData) {
@@ -78,6 +72,7 @@ func outputInfo(info *infoData) {
 	table.Append([]string{"Instance ID", info.InstanceId})
 	table.Append([]string{"Workspace class", fmt.Sprintf("%s: %s", info.WorkspaceClass.DisplayName, info.WorkspaceClass.Description)})
 	table.Append([]string{"Workspace URL", info.WorkspaceUrl})
+	table.Append([]string{"Workspace Context URL", info.WorkspaceContextUrl})
 	table.Append([]string{"Cluster host", info.ClusterHost})
 	table.Render()
 }

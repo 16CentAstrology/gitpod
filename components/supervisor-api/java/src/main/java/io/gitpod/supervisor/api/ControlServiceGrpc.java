@@ -1,4 +1,4 @@
-// Copyright (c) 2022 Gitpod GmbH. All rights reserved.
+// Copyright (c) 2024 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
 // See License.AGPL.txt in the project root for license information.
 
@@ -84,6 +84,68 @@ public final class ControlServiceGrpc {
     return getCreateSSHKeyPairMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<io.gitpod.supervisor.api.Control.CreateDebugEnvRequest,
+      io.gitpod.supervisor.api.Control.CreateDebugEnvResponse> getCreateDebugEnvMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CreateDebugEnv",
+      requestType = io.gitpod.supervisor.api.Control.CreateDebugEnvRequest.class,
+      responseType = io.gitpod.supervisor.api.Control.CreateDebugEnvResponse.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<io.gitpod.supervisor.api.Control.CreateDebugEnvRequest,
+      io.gitpod.supervisor.api.Control.CreateDebugEnvResponse> getCreateDebugEnvMethod() {
+    io.grpc.MethodDescriptor<io.gitpod.supervisor.api.Control.CreateDebugEnvRequest, io.gitpod.supervisor.api.Control.CreateDebugEnvResponse> getCreateDebugEnvMethod;
+    if ((getCreateDebugEnvMethod = ControlServiceGrpc.getCreateDebugEnvMethod) == null) {
+      synchronized (ControlServiceGrpc.class) {
+        if ((getCreateDebugEnvMethod = ControlServiceGrpc.getCreateDebugEnvMethod) == null) {
+          ControlServiceGrpc.getCreateDebugEnvMethod = getCreateDebugEnvMethod =
+              io.grpc.MethodDescriptor.<io.gitpod.supervisor.api.Control.CreateDebugEnvRequest, io.gitpod.supervisor.api.Control.CreateDebugEnvResponse>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CreateDebugEnv"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.gitpod.supervisor.api.Control.CreateDebugEnvRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.gitpod.supervisor.api.Control.CreateDebugEnvResponse.getDefaultInstance()))
+              .setSchemaDescriptor(new ControlServiceMethodDescriptorSupplier("CreateDebugEnv"))
+              .build();
+        }
+      }
+    }
+    return getCreateDebugEnvMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<io.gitpod.supervisor.api.Control.SendHeartBeatRequest,
+      io.gitpod.supervisor.api.Control.SendHeartBeatResponse> getSendHeartBeatMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "SendHeartBeat",
+      requestType = io.gitpod.supervisor.api.Control.SendHeartBeatRequest.class,
+      responseType = io.gitpod.supervisor.api.Control.SendHeartBeatResponse.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<io.gitpod.supervisor.api.Control.SendHeartBeatRequest,
+      io.gitpod.supervisor.api.Control.SendHeartBeatResponse> getSendHeartBeatMethod() {
+    io.grpc.MethodDescriptor<io.gitpod.supervisor.api.Control.SendHeartBeatRequest, io.gitpod.supervisor.api.Control.SendHeartBeatResponse> getSendHeartBeatMethod;
+    if ((getSendHeartBeatMethod = ControlServiceGrpc.getSendHeartBeatMethod) == null) {
+      synchronized (ControlServiceGrpc.class) {
+        if ((getSendHeartBeatMethod = ControlServiceGrpc.getSendHeartBeatMethod) == null) {
+          ControlServiceGrpc.getSendHeartBeatMethod = getSendHeartBeatMethod =
+              io.grpc.MethodDescriptor.<io.gitpod.supervisor.api.Control.SendHeartBeatRequest, io.gitpod.supervisor.api.Control.SendHeartBeatResponse>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "SendHeartBeat"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.gitpod.supervisor.api.Control.SendHeartBeatRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.gitpod.supervisor.api.Control.SendHeartBeatResponse.getDefaultInstance()))
+              .setSchemaDescriptor(new ControlServiceMethodDescriptorSupplier("SendHeartBeat"))
+              .build();
+        }
+      }
+    }
+    return getSendHeartBeatMethod;
+  }
+
   /**
    * Creates a new async stub that supports all call types for the service
    */
@@ -155,6 +217,26 @@ public final class ControlServiceGrpc {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCreateSSHKeyPairMethod(), responseObserver);
     }
 
+    /**
+     * <pre>
+     * CreateDebugEnv creates a debug workspace envs
+     * </pre>
+     */
+    public void createDebugEnv(io.gitpod.supervisor.api.Control.CreateDebugEnvRequest request,
+        io.grpc.stub.StreamObserver<io.gitpod.supervisor.api.Control.CreateDebugEnvResponse> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCreateDebugEnvMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * SendHeartBeat sends a heartbeat to server to keep the workspace alive
+     * </pre>
+     */
+    public void sendHeartBeat(io.gitpod.supervisor.api.Control.SendHeartBeatRequest request,
+        io.grpc.stub.StreamObserver<io.gitpod.supervisor.api.Control.SendHeartBeatResponse> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getSendHeartBeatMethod(), responseObserver);
+    }
+
     @java.lang.Override public final io.grpc.ServerServiceDefinition bindService() {
       return io.grpc.ServerServiceDefinition.builder(getServiceDescriptor())
           .addMethod(
@@ -171,6 +253,20 @@ public final class ControlServiceGrpc {
                 io.gitpod.supervisor.api.Control.CreateSSHKeyPairRequest,
                 io.gitpod.supervisor.api.Control.CreateSSHKeyPairResponse>(
                   this, METHODID_CREATE_SSHKEY_PAIR)))
+          .addMethod(
+            getCreateDebugEnvMethod(),
+            io.grpc.stub.ServerCalls.asyncUnaryCall(
+              new MethodHandlers<
+                io.gitpod.supervisor.api.Control.CreateDebugEnvRequest,
+                io.gitpod.supervisor.api.Control.CreateDebugEnvResponse>(
+                  this, METHODID_CREATE_DEBUG_ENV)))
+          .addMethod(
+            getSendHeartBeatMethod(),
+            io.grpc.stub.ServerCalls.asyncUnaryCall(
+              new MethodHandlers<
+                io.gitpod.supervisor.api.Control.SendHeartBeatRequest,
+                io.gitpod.supervisor.api.Control.SendHeartBeatResponse>(
+                  this, METHODID_SEND_HEART_BEAT)))
           .build();
     }
   }
@@ -213,6 +309,28 @@ public final class ControlServiceGrpc {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getCreateSSHKeyPairMethod(), getCallOptions()), request, responseObserver);
     }
+
+    /**
+     * <pre>
+     * CreateDebugEnv creates a debug workspace envs
+     * </pre>
+     */
+    public void createDebugEnv(io.gitpod.supervisor.api.Control.CreateDebugEnvRequest request,
+        io.grpc.stub.StreamObserver<io.gitpod.supervisor.api.Control.CreateDebugEnvResponse> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCreateDebugEnvMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * SendHeartBeat sends a heartbeat to server to keep the workspace alive
+     * </pre>
+     */
+    public void sendHeartBeat(io.gitpod.supervisor.api.Control.SendHeartBeatRequest request,
+        io.grpc.stub.StreamObserver<io.gitpod.supervisor.api.Control.SendHeartBeatResponse> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getSendHeartBeatMethod(), getCallOptions()), request, responseObserver);
+    }
   }
 
   /**
@@ -250,6 +368,26 @@ public final class ControlServiceGrpc {
     public io.gitpod.supervisor.api.Control.CreateSSHKeyPairResponse createSSHKeyPair(io.gitpod.supervisor.api.Control.CreateSSHKeyPairRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getCreateSSHKeyPairMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * CreateDebugEnv creates a debug workspace envs
+     * </pre>
+     */
+    public io.gitpod.supervisor.api.Control.CreateDebugEnvResponse createDebugEnv(io.gitpod.supervisor.api.Control.CreateDebugEnvRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCreateDebugEnvMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * SendHeartBeat sends a heartbeat to server to keep the workspace alive
+     * </pre>
+     */
+    public io.gitpod.supervisor.api.Control.SendHeartBeatResponse sendHeartBeat(io.gitpod.supervisor.api.Control.SendHeartBeatRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getSendHeartBeatMethod(), getCallOptions(), request);
     }
   }
 
@@ -291,10 +429,34 @@ public final class ControlServiceGrpc {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getCreateSSHKeyPairMethod(), getCallOptions()), request);
     }
+
+    /**
+     * <pre>
+     * CreateDebugEnv creates a debug workspace envs
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<io.gitpod.supervisor.api.Control.CreateDebugEnvResponse> createDebugEnv(
+        io.gitpod.supervisor.api.Control.CreateDebugEnvRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCreateDebugEnvMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * SendHeartBeat sends a heartbeat to server to keep the workspace alive
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<io.gitpod.supervisor.api.Control.SendHeartBeatResponse> sendHeartBeat(
+        io.gitpod.supervisor.api.Control.SendHeartBeatRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getSendHeartBeatMethod(), getCallOptions()), request);
+    }
   }
 
   private static final int METHODID_EXPOSE_PORT = 0;
   private static final int METHODID_CREATE_SSHKEY_PAIR = 1;
+  private static final int METHODID_CREATE_DEBUG_ENV = 2;
+  private static final int METHODID_SEND_HEART_BEAT = 3;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -320,6 +482,14 @@ public final class ControlServiceGrpc {
         case METHODID_CREATE_SSHKEY_PAIR:
           serviceImpl.createSSHKeyPair((io.gitpod.supervisor.api.Control.CreateSSHKeyPairRequest) request,
               (io.grpc.stub.StreamObserver<io.gitpod.supervisor.api.Control.CreateSSHKeyPairResponse>) responseObserver);
+          break;
+        case METHODID_CREATE_DEBUG_ENV:
+          serviceImpl.createDebugEnv((io.gitpod.supervisor.api.Control.CreateDebugEnvRequest) request,
+              (io.grpc.stub.StreamObserver<io.gitpod.supervisor.api.Control.CreateDebugEnvResponse>) responseObserver);
+          break;
+        case METHODID_SEND_HEART_BEAT:
+          serviceImpl.sendHeartBeat((io.gitpod.supervisor.api.Control.SendHeartBeatRequest) request,
+              (io.grpc.stub.StreamObserver<io.gitpod.supervisor.api.Control.SendHeartBeatResponse>) responseObserver);
           break;
         default:
           throw new AssertionError();
@@ -384,6 +554,8 @@ public final class ControlServiceGrpc {
               .setSchemaDescriptor(new ControlServiceFileDescriptorSupplier())
               .addMethod(getExposePortMethod())
               .addMethod(getCreateSSHKeyPairMethod())
+              .addMethod(getCreateDebugEnvMethod())
+              .addMethod(getSendHeartBeatMethod())
               .build();
         }
       }

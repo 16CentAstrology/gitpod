@@ -4,13 +4,15 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import React, { HTMLAttributeAnchorTarget } from "react";
+import React, { FunctionComponent, HTMLAttributeAnchorTarget } from "react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import cn from "classnames";
 
 export interface ContextMenuProps {
     children?: React.ReactChild[] | React.ReactChild;
     menuEntries: ContextMenuEntry[];
+    changeMenuState?: (state: boolean) => void;
     customClasses?: string;
 }
 
@@ -28,12 +30,17 @@ export interface ContextMenuEntry {
     link?: string;
     target?: HTMLAttributeAnchorTarget;
     download?: string;
+    rel?: string;
 }
 
 function ContextMenu(props: ContextMenuProps) {
     const [expanded, setExpanded] = useState(false);
+
     const toggleExpanded = () => {
         setExpanded(!expanded);
+        if (props.changeMenuState) {
+            props.changeMenuState(!expanded);
+        }
     };
 
     const keydownHandler = (evt: KeyboardEvent) => {
@@ -63,16 +70,16 @@ function ContextMenu(props: ContextMenuProps) {
             window.removeEventListener("keydown", keydownHandler);
             window.removeEventListener("click", clickHandler);
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []); // Empty array ensures that effect is only run on mount and unmount
-
-    const font = "text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100";
-
-    const menuId = String(Math.random());
 
     // Default 'children' is the three dots hamburger button.
     const children = props.children || (
         <svg
-            className="w-8 h-8 p-1 rounded-md text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+            className={cn(
+                "w-8 h-8 p-1 rounded-md text-gray-600 dark:text-gray-300",
+                expanded ? "bg-gray-200 dark:bg-gray-700" : "hover:bg-gray-200 dark:hover:bg-gray-700",
+            )}
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"
         >
@@ -86,8 +93,9 @@ function ContextMenu(props: ContextMenuProps) {
     );
 
     return (
-        <div className="relative cursor-pointer">
+        <div className="relative">
             <div
+                className="cursor-pointer"
                 onClick={(e) => {
                     toggleExpanded();
                     // Don't use `e.stopPropagation();` because that prevents that clicks on other context menus closes this one.
@@ -98,7 +106,7 @@ function ContextMenu(props: ContextMenuProps) {
             </div>
             {expanded ? (
                 <div
-                    className={`mt-2 z-50 bg-white dark:bg-gray-900 absolute flex flex-col border border-gray-200 dark:border-gray-800 rounded-lg truncated ${
+                    className={`mt-2 z-50 bg-white dark:bg-gray-900 absolute flex flex-col border border-gray-200 dark:border-gray-800 filter drop-shadow-xl rounded-lg truncated ${
                         props.customClasses || "w-48 right-0"
                     }`}
                     data-analytics='{"button_type":"context_menu"}'
@@ -107,30 +115,14 @@ function ContextMenu(props: ContextMenuProps) {
                         <p className="px-4 py-3">No actions available</p>
                     ) : (
                         props.menuEntries.map((e, index) => {
-                            const clickable = e.href || e.onClick || e.link;
                             const entry = (
-                                <div
-                                    className={`px-4 flex py-3 ${
-                                        clickable ? "hover:bg-gray-100 dark:hover:bg-gray-700" : ""
-                                    } ${e.active ? "bg-gray-50 dark:bg-gray-800" : ""} ${
-                                        index === 0 ? "rounded-t-lg" : ""
-                                    } ${
-                                        index === props.menuEntries.length - 1 ? "rounded-b-lg" : ""
-                                    } text-sm leading-1 ${e.customFontStyle || font} ${
-                                        e.separator ? " border-b border-gray-200 dark:border-gray-800" : ""
-                                    }`}
-                                    title={e.title}
-                                >
-                                    {e.customContent || (
-                                        <>
-                                            <div className="truncate w-52">{e.title}</div>
-                                            <div className="flex-1"></div>
-                                            {e.active ? <div className="pl-1 font-semibold">&#x2713;</div> : null}
-                                        </>
-                                    )}
-                                </div>
+                                <MenuEntry
+                                    {...e}
+                                    isFirst={index === 0}
+                                    isLast={index === props.menuEntries.length - 1}
+                                />
                             );
-                            const key = `entry-${menuId}-${index}-${e.title}`;
+                            const key = `entry-${index}-${e.title}`;
                             if (e.link) {
                                 return (
                                     <Link key={key} to={e.link} onClick={e.onClick} target={e.target}>
@@ -165,3 +157,47 @@ function ContextMenu(props: ContextMenuProps) {
 }
 
 export default ContextMenu;
+
+type MenuEntryProps = ContextMenuEntry & {
+    isFirst: boolean;
+    isLast: boolean;
+};
+export const MenuEntry: FunctionComponent<MenuEntryProps> = ({
+    title,
+    href,
+    link,
+    active = false,
+    separator = false,
+    customContent,
+    customFontStyle,
+    isFirst,
+    isLast,
+    onClick,
+}) => {
+    const clickable = href || link || onClick;
+
+    return (
+        <div
+            title={title}
+            className={cn(
+                "px-4 py-2 flex leading-1 text-sm",
+                customFontStyle || "text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100",
+                {
+                    "cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700": clickable,
+                    "bg-pk-surface-secondary": active,
+                    "rounded-t-lg": isFirst,
+                    "rounded-b-lg": isLast,
+                    "border-b border-gray-200 dark:border-gray-800": separator,
+                },
+            )}
+        >
+            {customContent || (
+                <>
+                    <div className="truncate w-52">{title}</div>
+                    <div className="flex-1"></div>
+                    {active ? <div className="pl-1 font-semibold">&#x2713;</div> : null}
+                </>
+            )}
+        </div>
+    );
+};

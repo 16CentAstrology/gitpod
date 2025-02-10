@@ -4,7 +4,7 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { WorkspaceCluster } from "@gitpod/gitpod-protocol/src/workspace-cluster";
+import { WorkspaceCluster } from "@gitpod/gitpod-protocol/lib/workspace-cluster";
 import { ClusterServiceServerOptions } from "./cluster-service-server";
 
 export const Configuration = Symbol("Configuration");
@@ -35,9 +35,10 @@ export interface Configuration {
         stoppingPhaseSeconds: number;
     };
 
-    // emulatePreparingIntervalSeconds configures how often we check for Workspaces in phase "preparing" for clusters we do not govern
-    emulatePreparingIntervalSeconds: number;
-
     // clusterSyncIntervalSeconds configures how often we sync workspace cluster information
     clusterSyncIntervalSeconds: number;
+
+    redis: {
+        address: string;
+    };
 }

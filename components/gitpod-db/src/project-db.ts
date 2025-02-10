@@ -5,31 +5,41 @@
  */
 
 import { PartialProject, Project, ProjectEnvVar, ProjectEnvVarWithValue, ProjectUsage } from "@gitpod/gitpod-protocol";
+import { TransactionalDB } from "./typeorm/transactional-db-impl";
 
 export const ProjectDB = Symbol("ProjectDB");
-export interface ProjectDB {
+export interface ProjectDB extends TransactionalDB<ProjectDB> {
     findProjectById(projectId: string): Promise<Project | undefined>;
-    findProjectByCloneUrl(cloneUrl: string): Promise<Project | undefined>;
-    findProjectsByCloneUrls(cloneUrls: string[]): Promise<(Project & { teamOwners?: string[] })[]>;
-    findTeamProjects(teamId: string): Promise<Project[]>;
-    findUserProjects(userId: string): Promise<Project[]>;
-    findProjectsBySearchTerm(
-        offset: number,
-        limit: number,
-        orderBy: keyof Project,
-        orderDir: "ASC" | "DESC",
-        searchTerm: string,
-    ): Promise<{ total: number; rows: Project[] }>;
+    findProjectsByCloneUrl(cloneUrl: string, organizationId?: string): Promise<Project[]>;
+    findProjects(orgID: string, limit?: number): Promise<Project[]>;
+    findProjectsBySearchTerm(args: FindProjectsBySearchTermArgs): Promise<{ total: number; rows: Project[] }>;
     storeProject(project: Project): Promise<Project>;
-    updateProject(partialProject: PartialProject): Promise<void>;
+    updateProject(partialProject: PartialProject): Promise<Project>;
     markDeleted(projectId: string): Promise<void>;
-    setProjectEnvironmentVariable(projectId: string, name: string, value: string, censored: boolean): Promise<void>;
+    findProjectEnvironmentVariableByName(projectId: string, name: string): Promise<ProjectEnvVar | undefined>;
+    addProjectEnvironmentVariable(projectId: string, envVar: ProjectEnvVarWithValue): Promise<ProjectEnvVar>;
+    updateProjectEnvironmentVariable(
+        projectId: string,
+        envVar: Partial<ProjectEnvVarWithValue>,
+    ): Promise<ProjectEnvVar | undefined>;
     getProjectEnvironmentVariables(projectId: string): Promise<ProjectEnvVar[]>;
     getProjectEnvironmentVariableById(variableId: string): Promise<ProjectEnvVar | undefined>;
     deleteProjectEnvironmentVariable(variableId: string): Promise<void>;
-    getProjectEnvironmentVariableValues(envVars: ProjectEnvVar[]): Promise<ProjectEnvVarWithValue[]>;
+    getProjectEnvironmentVariableValues(
+        envVars: Pick<ProjectEnvVar, "id" | "projectId">[],
+    ): Promise<ProjectEnvVarWithValue[]>;
     findCachedProjectOverview(projectId: string): Promise<Project.Overview | undefined>;
     storeCachedProjectOverview(projectId: string, overview: Project.Overview): Promise<void>;
     getProjectUsage(projectId: string): Promise<ProjectUsage | undefined>;
     updateProjectUsage(projectId: string, usage: Partial<ProjectUsage>): Promise<void>;
 }
+
+export type FindProjectsBySearchTermArgs = {
+    offset: number;
+    limit: number;
+    orderBy: keyof Project;
+    orderDir: "ASC" | "DESC";
+    searchTerm?: string;
+    organizationId?: string;
+    prebuildsEnabled?: boolean;
+};
