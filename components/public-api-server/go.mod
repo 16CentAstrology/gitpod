@@ -18,7 +18,7 @@ require (
 	github.com/hashicorp/golang-lru v0.5.4
 	github.com/prometheus/client_golang v1.13.0
 	github.com/relvacode/iso8601 v1.1.0
-	github.com/sirupsen/logrus v1.9.0
+	github.com/sirupsen/logrus v1.9.1
 	github.com/sourcegraph/jsonrpc2 v0.0.0-20200429184054-15c2290dcb37
 	github.com/spf13/cobra v1.4.0
 	github.com/stretchr/testify v1.8.1
