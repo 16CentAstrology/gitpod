@@ -48,7 +48,7 @@
     "@typescript-eslint/parser": "^4.21.0",
     "autoprefixer": "^9.8.6",
     "cypress": "^9.2.1",
-    "eslint": "^7.24.0",
+    "eslint": "^9.26.0",
     "eslint-config-react-app": "^6.0.0",
     "postcss": "^7.0.36",
     "react-scripts": "^4.0.3",
