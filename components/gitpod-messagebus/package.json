@@ -23,7 +23,7 @@
     "@gitpod/gitpod-protocol": "0.1.5",
     "amqplib": "^0.8.0",
     "opentracing": "^0.14.4",
-    "uuid": "^8.3.2"
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
     "@types/amqplib": "^0.8.2",
