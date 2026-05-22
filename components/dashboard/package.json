@@ -14,7 +14,7 @@
     "configcat-js": "^6.0.0",
     "countries-list": "^2.6.1",
     "dayjs": "^1.11.5",
-    "js-cookie": "^3.0.1",
+    "js-cookie": "^3.0.7",
     "monaco-editor": "^0.25.2",
     "query-string": "^7.1.1",
     "react": "^17.0.1",
