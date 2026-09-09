@@ -1,30 +1,30 @@
 module github.com/gitpod-io/gitpod/usage
 
-go 1.19
+go 1.25.0
 
 require (
 	github.com/gitpod-io/gitpod/common-go v0.0.0-00010101000000-000000000000
 	github.com/gitpod-io/gitpod/components/gitpod-db/go v0.0.0-00010101000000-000000000000
 	github.com/gitpod-io/gitpod/usage-api v0.0.0-00010101000000-000000000000
-	github.com/google/go-cmp v0.5.8
-	github.com/google/uuid v1.3.0
+	github.com/google/go-cmp v0.7.0
+	github.com/google/uuid v1.6.0
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0
 	github.com/prometheus/client_golang v1.13.0
 	github.com/robfig/cron v1.2.0
 	github.com/spf13/cobra v1.4.0
 	github.com/stretchr/testify v1.8.1
 	github.com/stripe/stripe-go/v72 v72.114.0
-	google.golang.org/grpc v1.50.1
-	google.golang.org/protobuf v1.28.1
+	google.golang.org/grpc v1.83.2
+	google.golang.org/protobuf v1.36.11
 	gorm.io/gorm v1.24.1
 )
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cespare/xxhash/v2 v2.1.2 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-sql-driver/mysql v1.6.0 // indirect
-	github.com/golang/protobuf v1.5.2 // indirect
+	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.3.0 // indirect
 	github.com/hashicorp/golang-lru v0.5.1 // indirect
 	github.com/heptiolabs/healthcheck v0.0.0-20211123025425-613501dd5deb // indirect
@@ -41,10 +41,10 @@ require (
 	github.com/sirupsen/logrus v1.9.0 // indirect
 	github.com/slok/go-http-metrics v0.10.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
-	golang.org/x/net v0.0.0-20220225172249-27dd8689420f // indirect
-	golang.org/x/sync v0.0.0-20220601150217-0de741cfad7f // indirect
-	golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8 // indirect
-	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.0.0-20220922220347-f3bd1da661af // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/genproto v0.0.0-20201019141844-1ed22bb0c154 // indirect
