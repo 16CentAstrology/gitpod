@@ -11,24 +11,42 @@ import (
 
 	"github.com/gitpod-io/gitpod/common-go/log"
 	v1 "github.com/gitpod-io/gitpod/usage-api/v1"
+	"github.com/robfig/cron"
 )
 
-func NewResetUsageJobSpec(schedule time.Duration, usageClient v1.UsageServiceClient) (JobSpec, error) {
-	spec := &ResetUsageJobSpec{
-		usageClient: usageClient,
+func NewResetUsageJob(schedule time.Duration, clientsConstructor ClientsConstructor) (JobSpec, error) {
+	job := &ResetUsageJobSpec{
+		clientsConstructor: clientsConstructor,
 	}
-	return NewPeriodicJobSpec(schedule, "reset_usage", WithoutConcurrentRun(spec))
+
+	parsed, err := cron.Parse(fmt.Sprintf("@every %s", schedule.String()))
+	if err != nil {
+		return JobSpec{}, fmt.Errorf("failed to parse period into schedule: %w", err)
+	}
+
+	return JobSpec{
+		Job:                 job,
+		ID:                  "reset_usage",
+		Schedule:            parsed,
+		InitialLockDuration: schedule,
+	}, nil
+
 }
 
 type ResetUsageJobSpec struct {
-	usageClient v1.UsageServiceClient
+	clientsConstructor ClientsConstructor
 }
 
 func (j *ResetUsageJobSpec) Run() (err error) {
-	log.Info("Running reset usage job.")
 	ctx := context.Background()
 
-	_, err = j.usageClient.ResetUsage(ctx, &v1.ResetUsageRequest{})
+	log.Info("Running reset usage job.")
+	usageClient, _, err := j.clientsConstructor()
+	if err != nil {
+		return fmt.Errorf("Failed to construct reset usage job clients: %w", err)
+	}
+
+	_, err = usageClient.ResetUsage(ctx, &v1.ResetUsageRequest{})
 	if err != nil {
 		return fmt.Errorf("failed to reset usage: %w", err)
 	}

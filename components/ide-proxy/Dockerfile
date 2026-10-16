@@ -2,24 +2,45 @@
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM alpine:3.16 as compress
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:030e45cb37187dff322bbefe9658bcaec31b824a5d523380771a64864c9f45d4 as compress
 
-RUN apk add brotli gzip
+RUN apk add brotli gzip curl
 
-COPY components-local-app--app/components-local-app--app-linux-amd64/local-app /bin/gitpod-local-companion-linux-amd64
-COPY components-local-app--app/components-local-app--app-darwin-amd64/local-app /bin/gitpod-local-companion-darwin-amd64
-COPY components-local-app--app/components-local-app--app-windows-amd64/local-app.exe /bin/gitpod-local-companion-windows-amd64.exe
-COPY components-local-app--app/components-local-app--app-linux-arm64/local-app /bin/gitpod-local-companion-linux-arm64
-COPY components-local-app--app/components-local-app--app-darwin-arm64/local-app /bin/gitpod-local-companion-darwin-arm64
-COPY components-local-app--app/components-local-app--app-windows-386/local-app.exe /bin/gitpod-local-companion-windows-arm64.exe
-COPY components-local-app--app/components-local-app--app-windows-386/local-app.exe /bin/gitpod-local-companion-windows-386.exe
+# Gitpod CLI and Local App — use a dedicated directory to avoid copying
+# system binaries (e.g. glibc's ldconfig) into the final image.
+COPY components-local-app--app-with-manifest/bin/* /app-bin/
 
-RUN for FILE in `ls /bin/gitpod-local-companion*`;do \
+RUN for FILE in `ls /app-bin/gitpod-local-companion*`;do \
   gzip -v -f -9 -k "$FILE"; \
-done
+  done
 
-FROM caddy/caddy:2.6.2-alpine
+RUN mkdir -p static/code
+RUN curl -o static/code/marketplace.json "https://raw.githubusercontent.com/EclipseFdn/publish-extensions/d9a7cc2d486ca881e9df310324f9752f48156283/extension-control/extensions.json"
 
+# Patch dependencies reported by Grype:
+# golang.org/x/crypto: GO-2026-6303, GO-2026-6354, GO-2026-6355
+# golang.org/x/net: GO-2026-5942
+# golang.org/x/text: GO-2026-5970
+# google.golang.org/grpc: GHSA-2v4p-qf9q-27wj, GHSA-hrxh-6v49-42gf, GHSA-vp52-pcj8-j9qc
+# Retain the smallstep/certificates fix for GHSA-q4r8-xm5f-56gw.
+FROM caddy:2.11.4-builder AS caddy-builder
+RUN xcaddy build v2.11.4 \
+  --replace github.com/smallstep/certificates=github.com/smallstep/certificates@v0.30.1 \
+  --replace golang.org/x/crypto=golang.org/x/crypto@v0.56.0 \
+  --replace golang.org/x/net=golang.org/x/net@v0.58.0 \
+  --replace golang.org/x/text=golang.org/x/text@v0.41.0 \
+  --replace google.golang.org/grpc=google.golang.org/grpc@v1.83.2 \
+  --output /caddy
+
+FROM caddy/caddy:2.11.4-alpine@sha256:f6bd5f6e7ffc0d9954d47155006bd73eb35f3360f2b0e3e6b46ee0af5ac565c4
+
+# Keep runtime packages current and remove the unused curl client inherited from Caddy.
+RUN apk upgrade --no-cache libssl3 libcrypto3 \
+  && apk upgrade --no-cache \
+  && apk del curl
+
+COPY --from=caddy-builder /caddy /usr/bin/caddy
 COPY conf/Caddyfile /etc/caddy/Caddyfile
 COPY static /www/
-COPY --from=compress /bin /www/static/bin
+COPY --from=compress /static /www
+COPY --from=compress /app-bin /www/static/bin

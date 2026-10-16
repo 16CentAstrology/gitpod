@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/bombsimon/logrusr/v2"
-	"github.com/gitpod-io/golang-crypto/ssh"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -25,16 +24,20 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	runtime_client "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	common_grpc "github.com/gitpod-io/gitpod/common-go/grpc"
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/pprof"
 	wsmanapi "github.com/gitpod-io/gitpod/ws-manager/api"
+	workspacev1 "github.com/gitpod-io/gitpod/ws-manager/api/crd/v1"
 	"github.com/gitpod-io/gitpod/ws-proxy/pkg/config"
 	"github.com/gitpod-io/gitpod/ws-proxy/pkg/proxy"
 	"github.com/gitpod-io/gitpod/ws-proxy/pkg/sshproxy"
+	"github.com/gitpod-io/golang-crypto/ssh"
 )
 
 var (
@@ -57,13 +60,17 @@ var runCmd = &cobra.Command{
 
 		opts := ctrl.Options{
 			Scheme:                 scheme,
-			Namespace:              cfg.Namespace,
 			HealthProbeBindAddress: cfg.ReadinessProbeAddr,
 			LeaderElection:         false,
+			Cache: cache.Options{
+				DefaultNamespaces: map[string]cache.Config{
+					cfg.Namespace: {},
+				},
+			},
 		}
 
 		if cfg.PrometheusAddr != "" {
-			opts.MetricsBindAddress = cfg.PrometheusAddr
+			opts.Metrics = metricsserver.Options{BindAddress: cfg.PrometheusAddr}
 		}
 
 		mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts)
@@ -71,10 +78,12 @@ var runCmd = &cobra.Command{
 			log.WithError(err).Fatal(err, "unable to start manager")
 		}
 
-		workspaceInfoProvider := proxy.NewRemoteWorkspaceInfoProvider(mgr.GetClient(), mgr.GetScheme())
-		err = workspaceInfoProvider.SetupWithManager(mgr)
+		infoprov, err := proxy.NewCRDWorkspaceInfoProvider(mgr.GetClient(), mgr.GetScheme())
 		if err != nil {
-			log.WithError(err).Fatal(err, "unable to create controller", "controller", "Pod")
+			log.WithError(err).Fatal("cannot create CRD-based info provider")
+		}
+		if err = infoprov.SetupWithManager(mgr); err != nil {
+			log.WithError(err).Fatal(err, "unable to create CRD-based info provider", "controller", "Workspace")
 		}
 
 		if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -113,7 +122,9 @@ var runCmd = &cobra.Command{
 			grpcOpts := common_grpc.DefaultClientOptions()
 			grpcOpts = append(grpcOpts, dialOption)
 
+			log.Info("Attempting to dial ws-manager, it's a blocking call that retries...")
 			conn, err := grpc.Dial(wsm.Addr, grpcOpts...)
+			// you will never get here if ws-manager is crashing, instead the readiness check for ws-proxy will restart the pod
 			if err != nil {
 				log.WithError(err).Fatal("cannot connect to ws-manager")
 			}
@@ -124,7 +135,28 @@ var runCmd = &cobra.Command{
 		}
 
 		// SSH Gateway
+
+		var caKey ssh.Signer
+		readCAKeyFile := func() {
+			caPrivateKeyB, err := os.ReadFile(cfg.Proxy.SSHGatewayCAKeyFile)
+			if err != nil {
+				log.WithError(err).Error("cannot read SSH Gateway CA key")
+				return
+			}
+			c, err := ssh.ParsePrivateKey(caPrivateKeyB)
+			if err != nil {
+				log.WithError(err).Error("cannot parse SSH Gateway CA key")
+				return
+			}
+			caKey = c
+		}
+
+		if cfg.Proxy.SSHGatewayCAKeyFile != "" {
+			readCAKeyFile()
+		}
+
 		var signers []ssh.Signer
+		var sshGatewayServer *sshproxy.Server
 		flist, err := os.ReadDir("/mnt/host-key")
 		if err == nil && len(flist) > 0 {
 			for _, f := range flist {
@@ -142,21 +174,25 @@ var runCmd = &cobra.Command{
 				signers = append(signers, hostSigner)
 			}
 			if len(signers) > 0 {
-				server := sshproxy.New(signers, workspaceInfoProvider, heartbeat)
+				sshGatewayServer = sshproxy.New(signers, infoprov, heartbeat, caKey)
 				l, err := net.Listen("tcp", ":2200")
 				if err != nil {
 					panic(err)
 				}
-				go server.Serve(l)
+				go sshGatewayServer.Serve(l)
 				log.Info("SSHGateway is up and running")
 			}
 		}
 
-		go proxy.NewWorkspaceProxy(cfg.Ingress, cfg.Proxy, proxy.HostBasedRouter(cfg.Ingress.Header, cfg.Proxy.GitpodInstallation.WorkspaceHostSuffix, cfg.Proxy.GitpodInstallation.WorkspaceHostSuffixRegex), workspaceInfoProvider, signers).MustServe()
-		log.Infof("started proxying on %s", cfg.Ingress.HTTPAddress)
+		ctrlCtx := ctrl.SetupSignalHandler()
+
+		go func() {
+			log.Infof("startint proxying on %s", cfg.Ingress.HTTPAddress)
+			proxy.NewWorkspaceProxy(cfg.Ingress, cfg.Proxy, proxy.HostBasedRouter(cfg.Ingress.Header, cfg.Proxy.GitpodInstallation.WorkspaceHostSuffix, cfg.Proxy.GitpodInstallation.WorkspaceHostSuffixRegex), infoprov, sshGatewayServer).MustServe(ctrlCtx)
+		}()
 
 		log.Info("🚪 ws-proxy is up and running")
-		if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		if err := mgr.Start(ctrlCtx); err != nil {
 			log.WithError(err).Fatal(err, "problem starting ws-proxy")
 		}
 
@@ -166,6 +202,7 @@ var runCmd = &cobra.Command{
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(workspacev1.AddToScheme(scheme))
 	rootCmd.AddCommand(runCmd)
 }
 

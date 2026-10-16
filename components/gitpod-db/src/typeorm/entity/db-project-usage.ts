@@ -19,8 +19,4 @@ export class DBProjectUsage {
 
     @Column("varchar")
     lastWorkspaceStart: string;
-
-    // This column triggers the db-sync deletion mechanism. It's not intended for public consumption.
-    @Column()
-    deleted: boolean;
 }

@@ -1,0 +1,31 @@
+name: "Preview environment delete"
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: read  # This is required for actions/checkout
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        required: true
+        description: "The name of the preview environment to delete"
+  delete:
+
+jobs:
+  delete:
+    if: github.event.ref_type == 'branch' || github.event.inputs.name != ''
+    runs-on: ubuntu-latest
+    container:
+      image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:main-gha.34488
+      options: --user root
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin@v4
+      - name: Setup Environment
+        uses: ./.github/actions/setup-environment
+        with:
+          identity_provider: ${{ secrets.DEV_PREVIEW_PROVIDER }}
+          service_account: ${{ secrets.DEV_PREVIEW_SA }}
+          leeway_segment_key: ${{ secrets.LEEWAY_SEGMENT_KEY }}
+      - name: Delete preview environment
+        uses: ./.github/actions/delete-preview
+        with:
+          name: ${{ github.event.inputs.name || github.event.ref}}

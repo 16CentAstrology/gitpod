@@ -6,7 +6,7 @@
 
 import { injectable, inject } from "inversify";
 
-import { FileProvider, MaybeContent } from "../repohost/file-provider";
+import { FileProvider, MaybeContent, RevisionNotFoundError } from "../repohost/file-provider";
 import { Commit, User, Repository } from "@gitpod/gitpod-protocol";
 import { GitHubRestApi } from "./api";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
@@ -29,21 +29,29 @@ export class GithubFileProvider implements FileProvider {
         user: User,
         path: string,
     ): Promise<string> {
+        const notFoundError = new RevisionNotFoundError(
+            `File ${path} does not exist in repository ${repository.owner}/${repository.name}`,
+        );
+        const fileExists =
+            (await this.getFileContent({ repository, revision: revisionOrBranch }, user, path)) !== undefined;
+        if (!fileExists) {
+            throw notFoundError;
+        }
+
         const commits = (
             await this.githubApi.run(user, (gh) =>
                 gh.repos.listCommits({
                     owner: repository.owner,
                     repo: repository.name,
                     sha: revisionOrBranch,
-                    // per_page: 1, // we need just the last one right?
+                    per_page: 1, // we just need the last one
                     path,
                 }),
             )
         ).data;
-
         const lastCommit = commits && commits[0];
         if (!lastCommit) {
-            throw new Error(`File ${path} does not exist in repository ${repository.owner}/${repository.name}`);
+            throw notFoundError;
         }
 
         return lastCommit.sha;
@@ -54,30 +62,38 @@ export class GithubFileProvider implements FileProvider {
             return undefined;
         }
 
+        const params = {
+            owner: commit.repository.owner,
+            repo: commit.repository.name,
+            path,
+            ref: commit.revision,
+            headers: {
+                accept: "application/vnd.github.raw",
+            },
+        };
+
         try {
-            const response = await this.githubApi.run(user, (api) =>
-                api.repos.getContent({
-                    owner: commit.repository.owner,
-                    repo: commit.repository.name,
-                    path,
-                    ref: commit.revision,
-                    headers: {
-                        accept: "application/vnd.github.VERSION.raw",
-                    },
-                }),
-            );
+            const response = await this.githubApi.run(user, (api) => api.repos.getContent(params));
             if (response.status === 200) {
                 if (typeof response.data === "string") {
                     return response.data;
                 }
-                console.warn("GithubFileProvider.getFileContent – unexpected response type.", {
-                    headers: response.headers,
-                    type: typeof response.data,
+                log.warn("GithubFileProvider.getFileContent – unexpected response type.", {
+                    request: params,
+                    response: {
+                        headers: {
+                            "content-encoding": response.headers["content-encoding"],
+                            "content-type": response.headers["content-type"],
+                        },
+                        type: typeof response.data,
+                    },
                 });
             }
             return undefined;
         } catch (err) {
-            log.debug(err);
+            log.debug("Failed to get GitHub file content", err, {
+                request: params,
+            });
         }
     }
 }

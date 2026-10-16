@@ -8,7 +8,7 @@ metadata:
   labels:
     prometheus: k8s
     role: alert-rules
-  name: openvsx-proxy-monitoring-rules
+  name: openvsx-monitoring-rules
   namespace: monitoring-satellite
 spec:
   groups:
@@ -17,6 +17,7 @@ spec:
     - alert: VSCodeExtensionInstallFailuresRatioTooHigh
       labels:
         severity: critical
+        dedicated: included
       for: 20m
       annotations:
         runbook_url: https://github.com/gitpod-io/runbooks/blob/main/runbooks/VSCodeExtensionInstallFailuresRatioTooHigh.md

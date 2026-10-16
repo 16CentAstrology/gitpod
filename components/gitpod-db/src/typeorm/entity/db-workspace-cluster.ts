@@ -8,10 +8,13 @@ import { PrimaryColumn, Column, Entity, Index } from "typeorm";
 import {
     AdmissionConstraint,
     TLSConfig,
+    WorkspaceClass,
     WorkspaceCluster,
     WorkspaceClusterState,
 } from "@gitpod/gitpod-protocol/lib/workspace-cluster";
 import { ValueTransformer } from "typeorm/decorator/options/ValueTransformer";
+
+export type WorkspaceRegion = "europe" | "north-america" | "south-america" | "africa" | "asia" | ""; // unknown;
 
 @Entity()
 // on DB but not Typeorm: @Index("ind_lastModified", ["_lastModified"])   // DBSync
@@ -86,13 +89,25 @@ export class DBWorkspaceCluster implements WorkspaceCluster {
     })
     admissionConstraints?: AdmissionConstraint[];
 
-    @PrimaryColumn({
+    @Column({
         type: "varchar",
         length: 60,
     })
-    applicationCluster: string;
+    region: WorkspaceRegion;
 
-    // This column triggers the db-sync deletion mechanism. It's not intended for public consumption.
+    // This column triggers the periodic deleter deletion mechanism. It's not intended for public consumption.
     @Column()
     deleted: boolean;
+
+    @Column({
+        type: "json",
+    })
+    availableWorkspaceClasses?: WorkspaceClass[];
+
+    @Column({
+        type: "varchar",
+        length: 100,
+        nullable: true,
+    })
+    preferredWorkspaceClass?: string;
 }

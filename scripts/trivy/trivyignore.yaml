@@ -1,0 +1,12 @@
+vulnerabilities:
+  # Typescript / typeorm
+  - id: CVE-2022-33171
+    paths:
+      - "app/node_modules/typeorm/package.json"
+    statement: |
+      This vulnerability in TypeORM's findOne / findOneOrFail functions can improperly interpret a crafted JSON object
+      and concatenate it into raw SQL, potentially allowing SQL injection attacks.
+
+      In Gitpod’s usage, TypeORM is not exposed to arbitrary user input. For example, DB migrations run preset queries;
+      the server/bridge code does not hand raw JSON from external sources to findOne. Therefore, there is no path for
+      injecting malicious JSON into a query, rendering the vulnerability non-exploitable.

@@ -15,6 +15,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/xerrors"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -24,8 +27,10 @@ import (
 	"github.com/gitpod-io/gitpod/agent-smith/pkg/common"
 	"github.com/gitpod-io/gitpod/agent-smith/pkg/config"
 	"github.com/gitpod-io/gitpod/agent-smith/pkg/detector"
+	common_grpc "github.com/gitpod-io/gitpod/common-go/grpc"
 	"github.com/gitpod-io/gitpod/common-go/log"
 	gitpod "github.com/gitpod-io/gitpod/gitpod-protocol"
+	wsmanapi "github.com/gitpod-io/gitpod/ws-manager/api"
 )
 
 const (
@@ -41,11 +46,15 @@ type Smith struct {
 	Kubernetes       kubernetes.Interface
 	metrics          *metrics
 
+	wsman wsmanapi.WorkspaceManagerClient
+
 	timeElapsedHandler    func(t time.Time) time.Duration
 	notifiedInfringements *lru.Cache
 
-	detector   detector.ProcessDetector
-	classifier classifier.ProcessClassifier
+	detector       detector.ProcessDetector
+	classifier     classifier.ProcessClassifier
+	fileDetector   detector.FileDetector
+	fileClassifier classifier.FileClassifier
 }
 
 // NewAgentSmith creates a new agent smith
@@ -96,6 +105,28 @@ func NewAgentSmith(cfg config.Config) (*Smith, error) {
 		}
 	}
 
+	grpcOpts := common_grpc.DefaultClientOptions()
+	if cfg.WorkspaceManager.TLS.Authority != "" || cfg.WorkspaceManager.TLS.Certificate != "" && cfg.WorkspaceManager.TLS.PrivateKey != "" {
+		tlsConfig, err := common_grpc.ClientAuthTLSConfig(
+			cfg.WorkspaceManager.TLS.Authority, cfg.WorkspaceManager.TLS.Certificate, cfg.WorkspaceManager.TLS.PrivateKey,
+			common_grpc.WithSetRootCAs(true),
+			common_grpc.WithServerName("ws-manager"),
+		)
+		if err != nil {
+			log.WithField("config", cfg.WorkspaceManager.TLS).Error("Cannot load ws-manager certs - this is a configuration issue.")
+			return nil, xerrors.Errorf("cannot load ws-manager certs: %w", err)
+		}
+
+		grpcOpts = append(grpcOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+	} else {
+		grpcOpts = append(grpcOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	conn, err := grpc.Dial(cfg.WorkspaceManager.Address, grpcOpts...)
+	if err != nil {
+		return nil, xerrors.Errorf("cannot dial ws-manager-mk2: %w", err)
+	}
+	wsman := wsmanapi.NewWorkspaceManagerClient(conn)
+
 	detec, err := detector.NewProcfsDetector()
 	if err != nil {
 		return nil, err
@@ -104,6 +135,32 @@ func NewAgentSmith(cfg config.Config) (*Smith, error) {
 	class, err := cfg.Blocklists.Classifier()
 	if err != nil {
 		return nil, err
+	}
+
+	// Initialize filesystem detection if enabled
+	var filesystemDetec detector.FileDetector
+	var filesystemClass classifier.FileClassifier
+	if cfg.FilesystemScanning != nil && cfg.FilesystemScanning.Enabled {
+		// Create filesystem detector config
+		fsConfig := detector.FileScanningConfig{
+			Enabled:      cfg.FilesystemScanning.Enabled,
+			ScanInterval: cfg.FilesystemScanning.ScanInterval.Duration,
+			MaxFileSize:  cfg.FilesystemScanning.MaxFileSize,
+			WorkingArea:  cfg.FilesystemScanning.WorkingArea,
+		}
+
+		// Create independent filesystem classifier (no dependency on process classifier)
+		filesystemClass, err = cfg.Blocklists.FileClassifier()
+		if err != nil {
+			log.WithError(err).Error("failed to create filesystem classifier")
+		} else {
+			filesystemDetec, err = detector.NewfileDetector(fsConfig, filesystemClass)
+			if err != nil {
+				log.WithError(err).Error("failed to create filesystem detector")
+			} else {
+				log.Info("Filesystem detector created successfully with independent classifier")
+			}
+		}
 	}
 
 	m := newAgentMetrics()
@@ -119,8 +176,12 @@ func NewAgentSmith(cfg config.Config) (*Smith, error) {
 		GitpodAPI:  api,
 		Kubernetes: clientset,
 
-		detector:   detec,
-		classifier: class,
+		wsman: wsman,
+
+		detector:       detec,
+		classifier:     class,
+		fileDetector:   filesystemDetec,
+		fileClassifier: filesystemClass,
 
 		notifiedInfringements: lru.New(notificationCacheSize),
 		metrics:               m,
@@ -196,6 +257,12 @@ type classifiedProcess struct {
 	Err error
 }
 
+type classifiedFile struct {
+	F   detector.File
+	C   *classifier.Classification
+	Err error
+}
+
 // Start gets a stream of Infringements from Run and executes a callback on them to apply a Penalty
 func (agent *Smith) Start(ctx context.Context, callback func(InfringingWorkspace, []config.PenaltyKind)) {
 	ps, err := agent.detector.DiscoverProcesses(ctx)
@@ -203,10 +270,21 @@ func (agent *Smith) Start(ctx context.Context, callback func(InfringingWorkspace
 		log.WithError(err).Fatal("cannot start process detector")
 	}
 
+	// Start filesystem detection if enabled
+	var fs <-chan detector.File
+	if agent.fileDetector != nil {
+		fs, err = agent.fileDetector.DiscoverFiles(ctx)
+		if err != nil {
+			log.WithError(err).Warn("cannot start filesystem detector")
+		}
+	}
+
 	var (
 		wg  sync.WaitGroup
 		cli = make(chan detector.Process, 500)
 		clo = make(chan classifiedProcess, 50)
+		fli = make(chan detector.File, 100)
+		flo = make(chan classifiedFile, 25)
 	)
 	agent.metrics.RegisterClassificationQueues(cli, clo)
 
@@ -237,6 +315,25 @@ func (agent *Smith) Start(ctx context.Context, callback func(InfringingWorkspace
 		}()
 	}
 
+	// Filesystem classification workers (fewer than process workers)
+	if agent.fileClassifier != nil {
+		for i := 0; i < 5; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for file := range fli {
+					class, err := agent.fileClassifier.MatchesFile(file.Path)
+					if err == nil && class.Level == classifier.LevelNoMatch {
+						log.Infof("File classification: no match - %s", file.Path)
+						continue
+					}
+					log.Infof("File classification result: %s (level: %s, err: %v)", file.Path, class.Level, err)
+					flo <- classifiedFile{F: file, C: class, Err: err}
+				}
+			}()
+		}
+	}
+
 	defer log.Info("agent smith main loop ended")
 
 	// We want to fill the classifier in a Go routine seaparete from using the classification
@@ -256,6 +353,15 @@ func (agent *Smith) Start(ctx context.Context, callback func(InfringingWorkspace
 				default:
 					// we're overfilling the classifier worker
 					agent.metrics.classificationBackpressureInDrop.Inc()
+				}
+			case file, ok := <-fs:
+				if !ok {
+					continue
+				}
+				select {
+				case fli <- file:
+				default:
+					// filesystem queue full, skip this file
 				}
 			}
 		}
@@ -288,6 +394,32 @@ func (agent *Smith) Start(ctx context.Context, callback func(InfringingWorkspace
 					},
 				},
 			})
+		case fileClass := <-flo:
+			log.Infof("Received classified file from flo channel")
+			file, cl, err := fileClass.F, fileClass.C, fileClass.Err
+			if err != nil {
+				log.WithError(err).WithFields(log.OWI(file.Workspace.OwnerID, file.Workspace.WorkspaceID, file.Workspace.InstanceID)).WithField("path", file.Path).Error("cannot classify filesystem file")
+				continue
+			}
+
+			log.WithField("path", file.Path).WithField("severity", cl.Level).WithField("message", cl.Message).
+				WithFields(log.OWI(file.Workspace.OwnerID, file.Workspace.WorkspaceID, file.Workspace.InstanceID)).
+				Info("filesystem signature detected")
+
+			_, _ = agent.Penalize(InfringingWorkspace{
+				SupervisorPID: file.Workspace.PID,
+				Owner:         file.Workspace.OwnerID,
+				InstanceID:    file.Workspace.InstanceID,
+				WorkspaceID:   file.Workspace.WorkspaceID,
+				GitRemoteURL:  []string{file.Workspace.GitURL},
+				Infringements: []Infringement{
+					{
+						Kind:        config.GradeKind(config.InfringementExec, common.Severity(cl.Level)), // Reuse exec for now
+						Description: fmt.Sprintf("filesystem signature: %s", cl.Message),
+						CommandLine: []string{file.Path}, // Use file path as "command"
+					},
+				},
+			})
 		}
 	}
 }
@@ -305,25 +437,25 @@ func (agent *Smith) Penalize(ws InfringingWorkspace) ([]config.PenaltyKind, erro
 	for _, p := range penalty {
 		switch p {
 		case config.PenaltyStopWorkspace:
-			log.WithField("infringement", ws.Infringements).WithFields(owi).Info("stopping workspace")
+			log.WithField("infringement", log.TrustedValueWrap{Value: ws.Infringements}).WithFields(owi).Info("stopping workspace")
 			agent.metrics.penaltyAttempts.WithLabelValues(string(p)).Inc()
-			err := agent.stopWorkspace(ws.SupervisorPID)
+			err := agent.stopWorkspace(ws.SupervisorPID, ws.InstanceID)
 			if err != nil {
 				log.WithError(err).WithFields(owi).Debug("failed to stop workspace")
 				agent.metrics.penaltyFailures.WithLabelValues(string(p), err.Error()).Inc()
 			}
 			return penalty, err
 		case config.PenaltyStopWorkspaceAndBlockUser:
-			log.WithField("infringement", ws.Infringements).WithFields(owi).Info("stopping workspace and blocking user")
+			log.WithField("infringement", log.TrustedValueWrap{Value: ws.Infringements}).WithFields(owi).Info("stopping workspace and blocking user")
 			agent.metrics.penaltyAttempts.WithLabelValues(string(p)).Inc()
-			err := agent.stopWorkspaceAndBlockUser(ws.SupervisorPID, ws.Owner, ws.WorkspaceID)
+			err := agent.stopWorkspaceAndBlockUser(ws.SupervisorPID, ws.Owner, ws.WorkspaceID, ws.InstanceID)
 			if err != nil {
 				log.WithError(err).WithFields(owi).Debug("failed to stop workspace and block user")
 				agent.metrics.penaltyFailures.WithLabelValues(string(p), err.Error()).Inc()
 			}
 			return penalty, err
 		case config.PenaltyLimitCPU:
-			log.WithField("infringement", ws.Infringements).WithFields(owi).Info("limiting CPU")
+			log.WithField("infringement", log.TrustedValueWrap{Value: ws.Infringements}).WithFields(owi).Info("limiting CPU")
 			agent.metrics.penaltyAttempts.WithLabelValues(string(p)).Inc()
 			err := agent.limitCPUUse(ws.Pod)
 			if err != nil {

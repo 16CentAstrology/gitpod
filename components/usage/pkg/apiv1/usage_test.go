@@ -85,7 +85,11 @@ func newUsageService(t *testing.T, dbconn *gorm.DB) v1.UsageServiceClient {
 		MinForUsersOnStripe: 1000,
 	})
 
-	v1.RegisterUsageServiceServer(srv.GRPC(), NewUsageService(dbconn, DefaultWorkspacePricer, costCenterManager))
+	usageService, err := NewUsageService(dbconn, DefaultWorkspacePricer, costCenterManager, "1m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1.RegisterUsageServiceServer(srv.GRPC(), usageService)
 	baseserver.StartServerForTests(t, srv)
 
 	conn, err := grpc.Dial(srv.GRPCAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -184,7 +188,7 @@ func TestReconcile(t *testing.T) {
 		// we do this to test that the fields in the usage records get updated to reflect the true values from the source of truth - instances.
 		draft := dbtest.NewUsage(t, db.Usage{
 			ID:                  uuid.New(),
-			AttributionID:       db.NewUserAttributionID(uuid.New().String()),
+			AttributionID:       db.NewTeamAttributionID(uuid.New().String()),
 			Description:         "Some description",
 			CreditCents:         1,
 			EffectiveTime:       db.VarcharTime{},
@@ -253,12 +257,12 @@ func TestGetAndSetCostCenter(t *testing.T) {
 	conn := dbtest.ConnectForTests(t)
 	costCenterUpdates := []*v1.CostCenter{
 		{
-			AttributionId:   string(db.NewUserAttributionID(uuid.New().String())),
+			AttributionId:   string(db.NewTeamAttributionID(uuid.New().String())),
 			SpendingLimit:   8000,
 			BillingStrategy: v1.CostCenter_BILLING_STRATEGY_STRIPE,
 		},
 		{
-			AttributionId:   string(db.NewUserAttributionID(uuid.New().String())),
+			AttributionId:   string(db.NewTeamAttributionID(uuid.New().String())),
 			SpendingLimit:   500,
 			BillingStrategy: v1.CostCenter_BILLING_STRATEGY_OTHER,
 		},
@@ -288,7 +292,6 @@ func TestGetAndSetCostCenter(t *testing.T) {
 }
 
 func TestListUsage(t *testing.T) {
-	conn := dbtest.ConnectForTests(t)
 
 	start := time.Date(2022, 7, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2022, 8, 1, 0, 0, 0, 0, time.UTC)
@@ -328,10 +331,6 @@ func TestListUsage(t *testing.T) {
 		CreditCents:   1000,
 	})
 
-	dbtest.CreateUsageRecords(t, conn, draftBefore, nondraftBefore, draftInside, nonDraftInside, nonDraftAfter)
-
-	usageService := newUsageService(t, conn)
-
 	tests := []struct {
 		start, end time.Time
 		// expectations
@@ -346,7 +345,12 @@ func TestListUsage(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		t.Run(fmt.Sprintf("Running test no %d", i+1), func(t *testing.T) {
+		t.Run(fmt.Sprintf("test no %d", i+1), func(t *testing.T) {
+			conn := dbtest.ConnectForTests(t)
+			dbtest.CreateUsageRecords(t, conn, draftBefore, nondraftBefore, draftInside, nonDraftInside, nonDraftAfter)
+
+			usageService := newUsageService(t, conn)
+
 			metaData, err := usageService.ListUsage(context.Background(), &v1.ListUsageRequest{
 				AttributionId: string(attributionID),
 				From:          timestamppb.New(test.start),
@@ -367,12 +371,6 @@ func TestListUsage(t *testing.T) {
 }
 
 func TestAddUSageCreditNote(t *testing.T) {
-	conn := dbtest.ConnectForTests(t)
-
-	attributionID := db.NewTeamAttributionID(uuid.New().String())
-
-	usageService := newUsageService(t, conn)
-
 	tests := []struct {
 		credits     int32
 		userId      string
@@ -387,7 +385,11 @@ func TestAddUSageCreditNote(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		t.Run(fmt.Sprintf("Running test no %d", i+1), func(t *testing.T) {
+		t.Run(fmt.Sprintf("test no %d", i+1), func(t *testing.T) {
+			attributionID := db.NewTeamAttributionID(uuid.New().String())
+			conn := dbtest.ConnectForTests(t)
+			usageService := newUsageService(t, conn)
+
 			_, err := usageService.AddUsageCreditNote(context.Background(), &v1.AddUsageCreditNoteRequest{
 				AttributionId: string(attributionID),
 				Credits:       test.credits,

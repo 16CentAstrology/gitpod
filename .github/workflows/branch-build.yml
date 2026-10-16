@@ -1,0 +1,629 @@
+name: Branch Build
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: write # This is required for actions/checkout and create release
+  pull-requests: write
+  actions: write  # This is required for trigger another action which is used by JetBrains integrateion tests
+  packages: read
+on:
+  pull_request:
+    # opened: PR is created
+    # synchronize: Commits are pushed to the PR branch
+    # reopened: PR is reopened
+    # edited: PR description/title is edited (for checkbox updates like [x] /werft with-preview)
+    types: [ opened, synchronize, reopened, edited ]
+  workflow_dispatch:
+    inputs:
+      recreate_vm:
+        required: true
+        type: string
+        description: "Whether to recreate the VM"
+        default: "false"
+      simulate_scheduled_run:
+        required: false
+        type: boolean
+        description: "Simulate a scheduled run"
+        default: false
+
+jobs:
+  configuration:
+    name: Configure job parameters
+    runs-on: ubuntu-latest
+    environment: branch-build
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && github.run_id || github.sha }}-configuration
+      cancel-in-progress: true
+    outputs:
+      is_main_branch: ${{ (github.head_ref || github.ref) == 'refs/heads/main' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || inputs.simulate_scheduled_run == true }}
+      version: ${{ steps.branches.outputs.sanitized-branch-name }}-gha.${{github.run_number}}
+      preview_enable: ${{ contains( steps.pr-details.outputs.pr_body, '[x] /werft with-preview') || (steps.output.outputs.with_integration_tests != '') }}
+      preview_name: ${{ github.head_ref || github.ref_name }}
+      build_no_cache: ${{ contains( steps.pr-details.outputs.pr_body, '[x] leeway-no-cache') }}
+      build_no_test: ${{ contains( steps.pr-details.outputs.pr_body, '[x] /werft no-test') }}
+      with_large_vm: ${{ contains( steps.pr-details.outputs.pr_body, '[X] /werft with-large-vm') || (steps.output.outputs.with_integration_tests != '') }}
+      publish_to_npm: ${{ contains( steps.pr-details.outputs.pr_body, '[X] /werft publish-to-npm') }}
+      publish_to_jbmp: ${{ contains( steps.pr-details.outputs.pr_body, '[X] /werft publish-to-jb-marketplace') }}
+      with_preemptible: ${{ contains( steps.pr-details.outputs.pr_body, '[X] /werft preemptible') }}
+      with_dedicated_emulation: ${{ contains( steps.pr-details.outputs.pr_body, '[X] with-dedicated-emulation') }}
+      analytics: ${{ steps.output.outputs.analytics }}
+      workspace_feature_flags: ${{ steps.output.outputs.workspace_feature_flags }}
+      pr_no_diff_skip: ${{ steps.pr-diff.outputs.pr_no_diff_skip }}
+      with_werft: ${{ steps.output.outputs.with-werft }}
+      with_integration_tests: ${{ steps.output.outputs.with_integration_tests }}
+      with_monitoring: ${{ contains( steps.pr-details.outputs.pr_body, '[x] with-monitoring') }}
+      latest_ide_version: ${{ contains( steps.pr-details.outputs.pr_body, '[x] latest-ide-version=true') }}
+      leeway_cache_bucket: ${{ steps.output.outputs.leeway_cache_bucket }}
+      image_repo_base: ${{ steps.output.outputs.image_repo_base }}
+      pr_number: ${{ steps.pr-details.outputs.number }}
+      pr_body: ${{ steps.pr-details.outputs.pr_body }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: true
+      - name: "Determine Branch"
+        id: branches
+        uses: ./.github/actions/sanitize-branch-name
+        # Since we trigger this worklow on other event types, besides pull_request
+        # We use this action to help us get the pr body, as it's not included in push/workflow_dispatch events
+      - uses: 8BitJonny/gh-get-current-pr@2.2.0
+        id: pr-details
+        with:
+          sha: ${{ github.event.pull_request.head.sha }}
+        # If the PR got edited, but no checkbox changes occurred, we don't want to run the whole build
+        # Therefore we set a flag and use it to skip the next jobs
+      - name: "Check PR diff"
+        id: pr-diff
+        if: (github.event_name == 'pull_request' && github.event.action == 'edited')
+        env:
+          PR_DESC: "${{  steps.pr-details.outputs.pr_body }}"
+          OLD_BODY: "${{ github.event.changes.body.from }}"
+        run: |
+          if ! diff <(echo "$OLD_BODY") <(echo "$PR_DESC") | grep -e '\[x\]' -e '\[X\]'; then
+             echo "pr_no_diff_skip=true" >> $GITHUB_OUTPUT
+          fi
+      - name: "Set outputs"
+        id: output
+        env:
+          PR_DESC: "${{ steps.pr-details.outputs.pr_body }}"
+          MAIN_BRANCH: ${{ (github.head_ref || github.ref) == 'refs/heads/main' }}
+        shell: bash
+        run: |
+          {
+            echo "workspace_feature_flags=$(echo "$PR_DESC" | grep -oiP '(?<=\[x\] workspace-feature-flags=).*?(?=\s*$)')"
+            echo "with_integration_tests=$(echo "$PR_DESC" | grep -oiP '(?<=\[x\] with-integration-tests=).*?(?=\s*$)')"
+            echo "analytics=$(echo "$PR_DESC" | grep -oiP '(?<=\[x\] analytics=).*?(?=\s*$)')"
+            echo "leeway_cache_bucket=$([[ "$MAIN_BRANCH"  = "true" ]] && echo "leeway-cache-main-c514a01" || echo "leeway-cache-dev-3ac8ef5")"
+            echo "image_repo_base=$([[ "$MAIN_BRANCH"  = "true" ]] && echo "eu.gcr.io/gitpod-core-dev" || echo "eu.gcr.io/gitpod-dev-artifact")"
+          } >> $GITHUB_OUTPUT
+
+  build-previewctl:
+    name: Build previewctl
+    if: |
+      (needs.configuration.outputs.pr_no_diff_skip != 'true') &&
+      (needs.configuration.outputs.preview_enable == 'true') &&
+      (needs.configuration.outputs.is_scheduled_run != 'true')
+    needs: [ configuration ]
+    environment: branch-build
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && github.run_id || github.sha }}-build-previewctl
+      cancel-in-progress: ${{ needs.configuration.outputs.is_main_branch == 'false' }}
+    runs-on: ubuntu-latest-16-cores
+    container:
+      image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:main-gha.34488
+      options: --user root
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin@v4
+      - name: Setup Environment
+        uses: ./.github/actions/setup-environment
+        with:
+          identity_provider: ${{ github.ref == 'refs/heads/main' && secrets.CORE_DEV_PROVIDER || secrets.DEV_PREVIEW_PROVIDER }}
+          service_account: ${{ github.ref == 'refs/heads/main' && secrets.CORE_DEV_SA || secrets.DEV_PREVIEW_SA }}
+          leeway_segment_key: ${{ secrets.LEEWAY_SEGMENT_KEY }}
+      - name: Build previewctl
+        id: build
+        shell: bash
+        env:
+          LEEWAY_REMOTE_CACHE_BUCKET: ${{needs.configuration.outputs.leeway_cache_bucket}}
+          LEEWAY_CACHE_UPLOAD_IMMEDIATE: true
+        run: |
+          leeway build dev/preview/previewctl:cli --cache remote
+  infrastructure:
+    needs: [ configuration, build-previewctl ]
+    environment: branch-build
+    if: |
+      (needs.configuration.outputs.pr_no_diff_skip != 'true') &&
+      (needs.configuration.outputs.preview_enable == 'true') &&
+      (needs.configuration.outputs.is_main_branch != 'true') &&
+      (needs.configuration.outputs.is_scheduled_run != 'true')
+    runs-on: ubuntu-latest
+    container:
+      image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:main-gha.34488
+      options: --user root
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && github.run_id || github.sha }}-infrastructure
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin@v4
+      - name: Setup Environment
+        uses: ./.github/actions/setup-environment
+        with:
+          identity_provider: ${{ secrets.DEV_PREVIEW_PROVIDER }}
+          service_account: ${{ secrets.DEV_PREVIEW_SA }}
+          leeway_segment_key: ${{ secrets.LEEWAY_SEGMENT_KEY }}
+      - name: Create preview environment infrastructure
+        id: create
+        uses: ./.github/actions/preview-create
+        with:
+          name: ${{ needs.configuration.outputs.preview_name }}
+          large_vm: ${{ needs.configuration.outputs.with_large_vm }}
+          preemptible: ${{ needs.configuration.outputs.with_preemptible }}
+          recreate_vm: ${{ inputs.recreate_vm }}
+
+  build-gitpod:
+    name: Build Gitpod
+    needs: [ configuration ]
+    environment: branch-build
+    runs-on: ubuntu-latest-16-cores
+    outputs:
+      affected_packages: ${{ steps.check_vulnerabilities.outputs.affected_packages }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && github.run_id || github.sha }}-build-gitpod
+      cancel-in-progress: ${{ needs.configuration.outputs.is_main_branch == 'false' }}
+    services:
+      mysql:
+        image: bitnamilegacy/mysql:8.0.33-debian-11-r24
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          #MYSQL_TCP_PORT: 23306 bitnamilegacy/mysql does not honor this, but has it's own:
+          MYSQL_PORT_NUMBER: 23306
+          MYSQL_AUTHENTICATION_PLUGIN: mysql_native_password
+        ports:
+          - 23306:23306
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+    container:
+      image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:main-gha.34488
+      options: --user root
+      env:
+        DB_HOST: "mysql"
+        DB_PORT: "23306"
+        REDIS_HOST: "redis"
+        # GitHub action + MySQL 8.0 need longer to initialize
+        DB_RETRIES: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin@v4
+      - uses: ./.github/actions/setup-environment
+        with:
+          identity_provider: ${{ github.ref == 'refs/heads/main' && secrets.CORE_DEV_PROVIDER || secrets.DEV_PREVIEW_PROVIDER }}
+          service_account: ${{ github.ref == 'refs/heads/main' && secrets.CORE_DEV_SA || secrets.DEV_PREVIEW_SA }}
+          leeway_segment_key: ${{ secrets.LEEWAY_SEGMENT_KEY }}
+      - name: Leeway Vet
+        shell: bash
+        run: |
+          leeway vet --ignore-warnings
+      - name: Pre-Commit Checks
+        shell: bash
+        run: |
+          RESULT=0
+          pre-commit run --show-diff-on-failure || RESULT=$?
+          if [ $RESULT -ne 0 ]; then
+            echo "::error title=The Pre-Commit Checks Failed.::Please run 'pre-commit run --show-diff-on-failure'"
+          fi
+          exit "$RESULT"
+      - name: Dev Build
+        id: dev-build
+        env:
+          JAVA_HOME: /home/gitpod/.sdkman/candidates/java/current
+          VERSION: ${{needs.configuration.outputs.version}}
+          LEEWAY_REMOTE_CACHE_BUCKET: ${{needs.configuration.outputs.leeway_cache_bucket}}
+          LEEWAY_CACHE_UPLOAD_IMMEDIATE: true
+          IMAGE_REPO_BASE: ${{needs.configuration.outputs.image_repo_base}}/dev
+        shell: bash
+        run: |
+          RESULT=0
+          set -x
+
+          leeway build dev:all \
+            --docker-build-options network=host \
+            --cache remote \
+            -Dversion=$VERSION \
+            -DlocalAppVersion=$VERSION \
+            -DimageRepoBase=$IMAGE_REPO_BASE \
+            --report large-report.html || RESULT=$?
+
+          set +x
+
+          # capture logs for the dev/image build, they're too big for GITHUB_STEP_SUMMARY
+          pup -p -f large-report.html '[id="dev/image:docker"] + details + details' > remove.txt
+
+          # remove logs for the dev/image build output from the report file
+          grep -vxFf  remove.txt large-report.html > report.html
+
+          cat report.html >> $GITHUB_STEP_SUMMARY
+
+          exit $RESULT
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # pin@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Leeway Build
+        id: leeway
+        shell: bash
+        env:
+          NODE_OPTIONS: "--max_old_space_size=4096"
+          JAVA_HOME: /home/gitpod/.sdkman/candidates/java/current
+          VERSION: ${{needs.configuration.outputs.version}}
+          PR_NO_CACHE: ${{needs.configuration.outputs.build_no_cache}}
+          PR_NO_TEST: ${{needs.configuration.outputs.build_no_test}}
+          PUBLISH_TO_NPM: ${{ needs.configuration.outputs.publish_to_npm == 'true'  || needs.configuration.outputs.is_main_branch == 'true' }}
+          JB_MARKETPLACE_PUBLISH_TOKEN: "${{ secrets.JB_MARKETPLACE_PUBLISH_TOKEN }}"
+          PUBLISH_TO_JBPM: ${{ needs.configuration.outputs.publish_to_jbmp == 'true'  || needs.configuration.outputs.is_main_branch == 'true' }}
+          CODECOV_TOKEN: "${{ secrets.CODECOV_TOKEN }}"
+          LEEWAY_REMOTE_CACHE_BUCKET: ${{needs.configuration.outputs.leeway_cache_bucket}}
+          IMAGE_REPO_BASE: ${{needs.configuration.outputs.image_repo_base}}/build
+          LEEWAY_CACHE_UPLOAD_IMMEDIATE: true
+
+          # SCM tokens for integration tests
+          GITPOD_TEST_TOKEN_BITBUCKET: "${{ secrets.GITPOD_TEST_TOKEN_BITBUCKET }}"
+          GITPOD_TEST_TOKEN_BITBUCKET_SERVER: "${{ secrets.GITPOD_TEST_TOKEN_BITBUCKET_SERVER }}"
+          GITPOD_TEST_TOKEN_BITBUCKET_SERVER_WRITE: "${{ secrets.GITPOD_TEST_TOKEN_BITBUCKET_SERVER_WRITE }}"
+          GITPOD_TEST_TOKEN_BITBUCKET_SERVER_READ: "${{ secrets.GITPOD_TEST_TOKEN_BITBUCKET_SERVER_READ }}"
+          GITPOD_TEST_TOKEN_GITHUB: "${{ secrets.GITPOD_TEST_TOKEN_GITHUB }}"
+          GITPOD_TEST_TOKEN_GITLAB: "${{ secrets.GITPOD_TEST_TOKEN_GITLAB }}"
+          GITPOD_TEST_TOKEN_AZURE_DEVOPS: "${{ secrets.GITPOD_TEST_TOKEN_AZURE_DEVOPS }}"
+        run: |
+          [[ "$PR_NO_CACHE" = "true" ]] && CACHE="none"       || CACHE="remote"
+          [[ "$PR_NO_TEST"  = "true" ]] && TEST="--dont-test" || TEST=""
+          [[ "${PUBLISH_TO_NPM}" = 'true' ]] && NPM_PUBLISH_TRIGGER=$(date +%s%3N) || NPM_PUBLISH_TRIGGER="false"
+
+          RESULT=0
+          set -x
+          # CI=true is a var set by GHA. Unsetting it for the build, as yarn builds treat warnings as errors if that var is set to true
+          CI= leeway build \
+            --cache $CACHE \
+            $TEST \
+            -Dversion=$VERSION \
+            --docker-build-options network=host \
+            --max-concurrent-tasks 1 \
+            -DlocalAppVersion=$VERSION \
+            -DpublishToNPM="${PUBLISH_TO_NPM}" \
+            -DnpmPublishTrigger="${NPM_PUBLISH_TRIGGER}" \
+            -DpublishToJBMarketplace="${PUBLISH_TO_JBPM}" \
+            -DimageRepoBase=$IMAGE_REPO_BASE \
+            --report report.html || RESULT=$?
+          set +x
+
+          cat report.html >> $GITHUB_STEP_SUMMARY
+
+          SUMMARY_SIZE=$(wc -c < $GITHUB_STEP_SUMMARY)
+          if [[ $SUMMARY_SIZE -gt 1000000 ]]; then
+            head -c 1000000 $GITHUB_STEP_SUMMARY > $GITHUB_STEP_SUMMARY.tmp
+            mv $GITHUB_STEP_SUMMARY.tmp $GITHUB_STEP_SUMMARY
+            (
+              echo '.....'
+              echo ''
+              echo ':x: **WARNING: Summary is too large and has been truncated.**'
+              echo ''
+            )  >> $GITHUB_STEP_SUMMARY
+          fi
+
+          exit $RESULT
+      - name: Tag the release
+        if: github.ref == 'refs/heads/main' && needs.configuration.outputs.is_scheduled_run != 'true'
+        run: |
+          git config --global user.name $GITHUB_USER
+          git config --global user.email $GITHUB_EMAIL
+          git tag -a ${VERSION} -m "Release ${VERSION}"
+          git push origin ${VERSION}
+        env:
+          GITHUB_USER: roboquat
+          GITHUB_EMAIL: roboquat@gitpod.io
+          VERSION: ${{ needs.configuration.outputs.version }}
+      - name: Scan for Vulnerabilities
+        id: scan
+        shell: bash
+        env:
+          VERSION: ${{needs.configuration.outputs.version}}
+          PUBLISH_TO_NPM: ${{ needs.configuration.outputs.publish_to_npm == 'true'  || needs.configuration.outputs.is_main_branch == 'true' }}
+          PUBLISH_TO_JBPM: ${{ needs.configuration.outputs.publish_to_jbmp == 'true'  || needs.configuration.outputs.is_main_branch == 'true' }}
+          LEEWAY_REMOTE_CACHE_BUCKET: ${{needs.configuration.outputs.leeway_cache_bucket}}
+          IMAGE_REPO_BASE: ${{needs.configuration.outputs.image_repo_base}}/build
+        run: |
+          [[ "$PR_NO_CACHE" = "true" ]] && CACHE="none"       || CACHE="remote"
+          [[ "$PR_NO_TEST"  = "true" ]] && TEST="--dont-test" || TEST=""
+          [[ "${PUBLISH_TO_NPM}" = 'true' ]] && NPM_PUBLISH_TRIGGER=$(date +%s%3N) || NPM_PUBLISH_TRIGGER="false"
+
+          sboms_dir=$(mktemp -d)
+          CI= leeway sbom export components:needs-vuln-scan --with-dependencies --output-dir "$sboms_dir" \
+            -Dversion=$VERSION \
+            --docker-build-options network=host \
+            --max-concurrent-tasks 1 \
+            -DlocalAppVersion=$VERSION \
+            -DpublishToNPM="${PUBLISH_TO_NPM}" \
+            -DnpmPublishTrigger="${NPM_PUBLISH_TRIGGER}" \
+            -DpublishToJBMarketplace="${PUBLISH_TO_JBPM}" \
+            -DimageRepoBase=$IMAGE_REPO_BASE
+
+          scans_dir=$(mktemp -d)
+          CI= leeway sbom scan components:needs-vuln-scan --with-dependencies --output-dir "$scans_dir" \
+            -Dversion=$VERSION \
+            --docker-build-options network=host \
+            --max-concurrent-tasks 1 \
+            -DlocalAppVersion=$VERSION \
+            -DpublishToNPM="${PUBLISH_TO_NPM}" \
+            -DnpmPublishTrigger="${NPM_PUBLISH_TRIGGER}" \
+            -DpublishToJBMarketplace="${PUBLISH_TO_JBPM}" \
+            -DimageRepoBase=$IMAGE_REPO_BASE || RESULT=$?
+
+          {
+            echo "leeway_sboms_dir=$sboms_dir"
+            echo "leeway_vulnerability_reports_dir=$scans_dir"
+          } >> $GITHUB_OUTPUT
+
+          cat "$scans_dir/vulnerability-summary.md" >> $GITHUB_STEP_SUMMARY
+
+          exit $RESULT
+      - name: Check for Critical Vulnerabilities
+        if: needs.configuration.outputs.is_scheduled_run == 'true'
+        id: check_vulnerabilities
+        shell: bash
+        run: |
+          # Parse vulnerability-stats.json from the scans directory
+          SCANS_DIR="${{ steps.scan.outputs.leeway_vulnerability_reports_dir }}"
+          CRITICAL_PACKAGES=$(jq -r '.[] | select(.critical > 0) | "\(.name): \(.critical) critical vulnerabilities"' "$SCANS_DIR/vulnerability-stats.json")
+
+          package_from_report() {
+            local package
+            package="$(basename "$1" .json)"
+            package="${package//--/:}"
+
+            for prefix in components dev install test; do
+              if [[ "$package" == "$prefix-"* ]]; then
+                package="$prefix/${package#"$prefix-"}"
+                break
+              fi
+            done
+
+            printf '%s' "$package"
+          }
+
+          append_critical_finding_summary() {
+            {
+              echo
+              echo "### Critical vulnerability details"
+              echo
+              echo "| Affected package | Vulnerability | Artifact | Version | Location | Fix state / fixed version |"
+              echo "| --- | --- | --- | --- | --- | --- |"
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            details_found=false
+            while IFS= read -r -d '' report; do
+              package="$(package_from_report "$report")"
+              details="$(
+                jq -r --arg package "$package" '
+                  def md_escape:
+                    tostring
+                    | gsub("\r"; " ")
+                    | gsub("\n"; "<br>")
+                    | gsub("\\|"; "\\|");
+
+                  .matches[]?
+                  | select((.vulnerability.severity // "" | ascii_downcase) == "critical")
+                  | ((.artifact.locations // []) | map(.path // .layerID // "unknown") | unique | join("<br>")) as $locations
+                  | (.vulnerability.fix.state // "unknown") as $fix_state
+                  | ((.vulnerability.fix.versions // []) | unique | join(", ")) as $fixed_versions
+                  | (if $locations == "" then "unknown" else $locations end) as $location_display
+                  | (if $fixed_versions == "" then $fix_state else "\($fix_state): \($fixed_versions)" end) as $fix_display
+                  | "| `\($package | md_escape)` | `\((.vulnerability.id // "unknown") | md_escape)` | `\((.artifact.name // "unknown") | md_escape)` | `\((.artifact.version // "unknown") | md_escape)` | `\($location_display | md_escape)` | `\($fix_display | md_escape)` |"
+                ' "$report"
+              )"
+
+              if [ -n "$details" ]; then
+                details_found=true
+                echo "$details" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done < <(find "$SCANS_DIR" -maxdepth 1 -name '*.json' ! -name 'vulnerability-stats.json' -print0 | sort -z)
+
+            if [ "$details_found" = false ]; then
+              echo "_No detailed critical findings were present in the report JSON files._" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
+          # If there are critical packages, list them and fail the build
+          if [ -n "$CRITICAL_PACKAGES" ]; then
+            echo "::error::Critical vulnerabilities found in the following packages:"
+            echo "$CRITICAL_PACKAGES" | tee -a $GITHUB_STEP_SUMMARY
+            echo "affected_packages<<EOF" >> $GITHUB_OUTPUT
+            echo "$CRITICAL_PACKAGES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            append_critical_finding_summary
+            exit 1
+          else
+            echo "No critical vulnerabilities found."
+          fi
+      - name: Upload SBOMs
+        if: ${{ always() && steps.scan.outputs.leeway_sboms_dir != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4
+        with:
+          name: sboms
+          path: ${{ steps.scan.outputs.leeway_sboms_dir }}
+      - name: Upload vulnerability reports
+        if: ${{ always() && steps.scan.outputs.leeway_vulnerability_reports_dir != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4
+        with:
+          name: vulnerability-reports
+          path: ${{ steps.scan.outputs.leeway_vulnerability_reports_dir }}
+  install:
+    name: "Install Gitpod"
+    needs:
+      - configuration
+      - build-previewctl
+      - build-gitpod
+      - infrastructure
+    environment: branch-build
+    if: needs.configuration.outputs.is_scheduled_run != 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:main-gha.34488
+      options: --user root
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && github.run_id || github.sha }}-install
+      cancel-in-progress: ${{ needs.configuration.outputs.is_main_branch == 'false' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin@v4
+      - name: Setup Environment
+        uses: ./.github/actions/setup-environment
+        with:
+          identity_provider: ${{ secrets.DEV_PREVIEW_PROVIDER }}
+          service_account: ${{ secrets.DEV_PREVIEW_SA }}
+          leeway_segment_key: ${{ secrets.LEEWAY_SEGMENT_KEY }}
+      - name: Deploy Gitpod to the preview environment
+        id: deploy-gitpod
+        uses: ./.github/actions/deploy-gitpod
+        with:
+          name: ${{ needs.configuration.outputs.preview_name }}
+          version: ${{needs.configuration.outputs.version}}
+          with_dedicated_emu: ${{needs.configuration.outputs.with_dedicated_emulation}}
+          analytics: ${{needs.configuration.outputs.analytics}}
+          workspace_feature_flags: ${{needs.configuration.outputs.workspace_feature_flags}}
+          image_repo_base: ${{needs.configuration.outputs.image_repo_base}}/build
+      - uses: actions/github-script@00f12e3e20659f42342b1c0226afda7f7c042325 # pin@v6
+        if: needs.configuration.outputs.pr_number != '' && contains(needs.configuration.outputs.pr_body, 'gitpod:summary')
+        with:
+          script: |
+            const prNumber = ${{ needs.configuration.outputs.pr_number }};
+
+            const summaryEncoded = `${{ steps.deploy-gitpod.outputs.report }}`;
+            const summary = Buffer.from(summaryEncoded, 'base64').toString('utf8');
+
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: prNumber,
+            });
+
+            const prBody = pr.body;
+
+            const newBody = prBody.replace('gitpod:summary', summary);
+
+            await github.rest.pulls.update({
+              ...context.repo,
+              pull_number: prNumber,
+              body: newBody,
+            });
+
+  monitoring:
+    name: "Install Monitoring Satellite"
+    needs: [ infrastructure, build-previewctl ]
+    environment: branch-build
+    runs-on: ubuntu-latest
+    container:
+      image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:main-gha.34488
+      options: --user root
+    if: needs.configuration.outputs.with_monitoring == 'true' && needs.configuration.outputs.is_scheduled_run != 'true'
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && github.run_id || github.sha }}-monitoring
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin@v4
+      - name: Setup Environment
+        uses: ./.github/actions/setup-environment
+        with:
+          identity_provider: ${{ secrets.DEV_PREVIEW_PROVIDER }}
+          service_account: ${{ secrets.DEV_PREVIEW_SA }}
+          leeway_segment_key: ${{ secrets.LEEWAY_SEGMENT_KEY }}
+      - name: Deploy monitoring satellite to the preview environment
+        id: deploy-monitoring-satellite
+        uses: ./.github/actions/deploy-monitoring-satellite
+
+  integration-test:
+    name: "Run integration test"
+    needs:
+      - configuration
+      - build-previewctl
+      - build-gitpod
+      - infrastructure
+      - install
+    environment: branch-build
+    runs-on: ubuntu-latest
+    container:
+      image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:main-gha.34488
+      options: --user root
+    if: needs.configuration.outputs.with_integration_tests != '' && needs.configuration.outputs.is_scheduled_run != 'true'
+    concurrency:
+      group: ${{ needs.configuration.outputs.preview_name }}-integration-test
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin@v4
+      - name: Run integration test
+        id: integration-test
+        uses: ./.github/actions/integration-tests
+        with:
+          preview_name: ${{ needs.configuration.outputs.preview_name }}
+          test_suite: ${{ needs.configuration.outputs.with_integration_tests }}
+          notify_slack_webhook: ''
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          latest_ide_version: ${{ needs.configuration.outputs.latest_ide_version }}
+          test_build_id: ${{ github.run_id }}
+          test_build_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          test_build_ref: ${{ github.head_ref || github.ref }}
+          identity_provider: ${{ secrets.DEV_PREVIEW_PROVIDER }}
+          service_account: ${{ secrets.DEV_PREVIEW_SA }}
+          leeway_segment_key: ${{ secrets.LEEWAY_SEGMENT_KEY }}
+
+  workspace-integration-tests-main:
+    name: "Run workspace integration tests on main branch"
+    needs:
+      - configuration
+      - build-gitpod
+    if: needs.configuration.outputs.is_main_branch == 'true' && needs.configuration.outputs.is_scheduled_run != 'true'
+    uses: ./.github/workflows/workspace-integration-tests.yml
+    with:
+      version: ${{ needs.configuration.outputs.version }}
+    secrets: inherit
+
+  ide-code-updates:
+    name: "Run VS Code update jobs on main branch"
+    needs:
+      - configuration
+      - build-gitpod
+    if: needs.configuration.outputs.is_main_branch == 'true' && needs.configuration.outputs.is_scheduled_run != 'true'
+    uses: ./.github/workflows/code-updates.yml
+    secrets: inherit
+
+  ide-jb-updates:
+    name: "Run JetBrains update jobs on main branch"
+    needs:
+      - configuration
+      - build-gitpod
+    if: needs.configuration.outputs.is_main_branch == 'true' && needs.configuration.outputs.is_scheduled_run != 'true'
+    uses: ./.github/workflows/jetbrains-updates.yml
+    secrets: inherit
+
+  notify-scheduled-failure:
+    name: "Notify on scheduled run failure"
+    if: needs.configuration.outputs.is_scheduled_run == 'true' && failure()
+    needs:
+      - configuration
+      - build-gitpod
+      - workspace-integration-tests-main
+      - ide-code-updates
+      - ide-jb-updates
+    environment: branch-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slack Notification
+        uses: rtCamp/action-slack-notify@cdf0a2130cbcdfd82ba5fcac8e076370bf381b36 # pin@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.WORKSPACE_SLACK_WEBHOOK }}
+          SLACK_ICON_EMOJI: ":x:"
+          SLACK_USERNAME: "Scheduled Build"
+          SLACK_COLOR: "danger"
+          SLACK_MESSAGE: "⚠️ Security Alert: Daily vulnerability scan detected critical vulnerabilities in the following packages:\n${{ needs.build-gitpod.outputs.affected_packages }}"
+          SLACK_FOOTER: "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Logs>"

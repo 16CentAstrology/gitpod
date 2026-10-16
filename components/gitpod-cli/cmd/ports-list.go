@@ -10,9 +10,9 @@ import (
 	"os"
 	"time"
 
-	supervisor_helper "github.com/gitpod-io/gitpod/gitpod-cli/pkg/supervisor-helper"
+	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/supervisor"
 	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/utils"
-	supervisor "github.com/gitpod-io/gitpod/supervisor/api"
+	"github.com/gitpod-io/gitpod/supervisor/api"
 	"github.com/spf13/cobra"
 
 	"github.com/olekukonko/tablewriter"
@@ -21,24 +21,28 @@ import (
 var listPortsCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Lists the workspace ports and their states.",
-	Run: func(*cobra.Command, []string) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 		defer cancel()
 
-		ports, portsListError := supervisor_helper.GetPortsList(ctx)
+		client, err := supervisor.New(ctx)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
 
-		if portsListError != nil {
-			utils.LogError(ctx, portsListError, "Could not get the ports list.")
-			return
+		ports, err := client.GetPortsList(ctx)
+		if err != nil {
+			return err
 		}
 
 		if len(ports) == 0 {
 			fmt.Println("No ports detected.")
-			return
+			return nil
 		}
 
 		table := tablewriter.NewWriter(os.Stdout)
-		table.SetHeader([]string{"Port", "Status", "URL", "Name & Description"})
+		table.SetHeader([]string{"Port", "Status", "Protocol", "URL", "Name & Description"})
 		table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
 		table.SetCenterSeparator("|")
 
@@ -55,7 +59,7 @@ var listPortsCmd = &cobra.Command{
 			if !port.Served {
 				status = "not served"
 			} else if !accessible {
-				if port.AutoExposure == supervisor.PortAutoExposure_failed {
+				if port.AutoExposure == api.PortAutoExposure_failed {
 					status = "failed to expose"
 					statusColor = tablewriter.FgRedColor
 				} else {
@@ -63,20 +67,20 @@ var listPortsCmd = &cobra.Command{
 					statusColor = tablewriter.FgYellowColor
 				}
 			} else if port.Exposed != nil {
-				if port.Exposed.Visibility == supervisor.PortVisibility_public {
+				if port.Exposed.Visibility == api.PortVisibility_public {
 					status = "open (public)"
 					statusColor = tablewriter.FgHiGreenColor
 				}
-				if port.Exposed.Visibility == supervisor.PortVisibility_private {
+				if port.Exposed.Visibility == api.PortVisibility_private {
 					status = "open (private)"
 					statusColor = tablewriter.FgHiCyanColor
 				}
 			} else if port.Tunneled != nil {
-				if port.Tunneled.Visibility == supervisor.TunnelVisiblity(supervisor.TunnelVisiblity_value["network"]) {
+				if port.Tunneled.Visibility == api.TunnelVisiblity(api.TunnelVisiblity_value["network"]) {
 					status = "open on all interfaces"
 					statusColor = tablewriter.FgHiGreenColor
 				}
-				if port.Tunneled.Visibility == supervisor.TunnelVisiblity(supervisor.TunnelVisiblity_value["host"]) {
+				if port.Tunneled.Visibility == api.TunnelVisiblity(api.TunnelVisiblity_value["host"]) {
 					status = "open on localhost"
 					statusColor = tablewriter.FgHiGreenColor
 				}
@@ -97,12 +101,13 @@ var listPortsCmd = &cobra.Command{
 			}
 
 			table.Rich(
-				[]string{fmt.Sprint(port.LocalPort), status, exposedUrl, nameAndDescription},
+				[]string{fmt.Sprint(port.LocalPort), status, port.Exposed.Protocol.String(), exposedUrl, nameAndDescription},
 				colors,
 			)
 		}
 
 		table.Render()
+		return nil
 	},
 }
 

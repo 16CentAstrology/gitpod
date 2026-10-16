@@ -13,21 +13,23 @@ import { Branch, CommitInfo, User } from "@gitpod/gitpod-protocol";
 import { GarbageCollectedCache } from "@gitpod/gitpod-protocol/lib/util/garbage-collected-cache";
 import { injectable, inject } from "inversify";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
-import { GitHubScope } from "./scopes";
 import { AuthProviderParams } from "../auth/auth-provider";
 import { GitHubTokenHelper } from "./github-token-helper";
 import { Deferred } from "@gitpod/gitpod-protocol/lib/util/deferred";
 
 import { URL } from "url";
+import { GitHubOAuthScopes } from "@gitpod/public-api-common/lib/auth-providers";
 
 export class GitHubApiError extends Error {
+    readonly code: number;
     constructor(public readonly response: OctokitResponse<any>) {
         super(`GitHub API Error. Status: ${response.status}`);
+        this.code = response.status;
         this.name = "GitHubApiError";
     }
 }
 export namespace GitHubApiError {
-    export function is(error: Error | null): error is GitHubApiError {
+    export function is(error: any): error is GitHubApiError {
         return !!error && error.name === "GitHubApiError";
     }
 }
@@ -147,7 +149,7 @@ export class GitHubRestApi {
         } else {
             const githubToken = await this.tokenHelper.getTokenWithScopes(
                 userOrToken,
-                GitHubScope.Requirements.DEFAULT,
+                GitHubOAuthScopes.Requirements.DEFAULT,
             );
             token = githubToken.value;
         }
@@ -156,7 +158,7 @@ export class GitHubRestApi {
     }
 
     protected get userAgent() {
-        return (this.config.oauth && new URL(this.config.oauth?.callBackUrl)?.hostname) || "GitPod unknown";
+        return (this.config.oauth && new URL(this.config.oauth?.callBackUrl)?.hostname) || "Gitpod unknown";
     }
 
     /**
@@ -198,7 +200,7 @@ export class GitHubRestApi {
             return response;
         } catch (error) {
             if (error.status) {
-                throw new GitHubApiError(error);
+                throw new GitHubApiError(error as OctokitResponse<any>);
             }
             throw error;
         } finally {

@@ -4,7 +4,7 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { BillingTier, User } from "../protocol";
+import { BillingTier } from "../protocol";
 
 export const Client = Symbol("Client");
 
@@ -12,7 +12,7 @@ export const Client = Symbol("Client");
 // Set the attributes which you want to use to group audiences into.
 export interface Attributes {
     // user.id is mapped to ConfigCat's "identifier" + "custom.user_id"
-    user?: User | { id: string; email?: string };
+    user?: { id: string; email?: string };
 
     // The BillingTier of this particular user
     billingTier?: BillingTier;
@@ -22,8 +22,12 @@ export interface Attributes {
 
     // Currently selected Gitpod Team ID (mapped to "custom.team_id")
     teamId?: string;
+
     // Currently selected Gitpod Team Name (mapped to "custom.team_name")
     teamName?: string;
+
+    // Host name of the Gitpod installation (mapped to "custom.gitpod_host")
+    gitpodHost?: string;
 }
 
 export interface Client {

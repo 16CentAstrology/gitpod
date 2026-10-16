@@ -8,18 +8,23 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/cockroachdb/errors"
-
 	"github.com/gitpod-io/gitpod/previewctl/pkg/util"
 )
 
 func GetName(branch string) (string, error) {
 	var err error
+
+	if v := os.Getenv("GITHUB_ACTIONS"); v != "" && branch == "" {
+		branch = os.Getenv("GITHUB_HEAD_REF")
+	}
+
 	if branch == "" {
 		branch, err = util.BranchFromGit(branch)
 		if err != nil {

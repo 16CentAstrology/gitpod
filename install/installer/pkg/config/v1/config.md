@@ -32,8 +32,6 @@ Config defines the v1 version structure of the gitpod config file
 |`objectStorage.cloudStorage.serviceAccount.kind`|string|N| `secret` ||
 |`objectStorage.cloudStorage.serviceAccount.name`|string|Y|  ||
 |`objectStorage.cloudStorage.project`|string|Y|  ||
-|`objectStorage.azure.credentials.kind`|string|N| `secret` ||
-|`objectStorage.azure.credentials.name`|string|Y|  ||
 |`objectStorage.maximumBackupCount`|int|N|  |  DEPRECATED|
 |`objectStorage.blobQuota`|int64|N|  ||
 |`objectStorage.resources.requests`||Y|  |  todo(sje): add custom validation to corev1.ResourceList|
@@ -54,7 +52,7 @@ Config defines the v1 version structure of the gitpod config file
 |`httpProxy.name`|string|Y|  ||
 |`imagePullSecrets[ ].kind`|string|N| `secret` ||
 |`imagePullSecrets[ ].name`|string|Y|  ||
-|`workspace.runtime.fsShiftMethod`|string|N| `fuse`, `shiftfs` ||
+|`workspace.runtime.fsShiftMethod`|string|N| `shiftfs` ||
 |`workspace.runtime.containerdRuntimeDir`|string|Y|  |  The location of containerd socket on the host machine|
 |`workspace.runtime.containerdSocket`|string|Y|  |  The location of containerd socket on the host machine|
 |`workspace.resources.requests`||Y|  |  todo(sje): add custom validation to corev1.ResourceList|
@@ -63,12 +61,6 @@ Config defines the v1 version structure of the gitpod config file
 |`workspace.templates.prebuild`||N|  ||
 |`workspace.templates.imagebuild`||N|  ||
 |`workspace.templates.regular`||N|  ||
-|`workspace.prebuildPVC.size`||Y|  |  Size is a size of persistent volume claim to use|
-|`workspace.prebuildPVC.storageClass`|string|N|  |  StorageClass is a storage class of persistent volume claim to use|
-|`workspace.prebuildPVC.snapshotClass`|string|N|  |  SnapshotClass is a snapshot class name that is used to create volume snapshot|
-|`workspace.pvc.size`||Y|  |  Size is a size of persistent volume claim to use|
-|`workspace.pvc.storageClass`|string|N|  |  StorageClass is a storage class of persistent volume claim to use|
-|`workspace.pvc.snapshotClass`|string|N|  |  SnapshotClass is a snapshot class name that is used to create volume snapshot|
 |`workspace.maxLifetime`||Y|  |  MaxLifetime is the maximum time a workspace is allowed to run. After that, the workspace times out despite activity|
 |`workspace.timeoutDefault`||N|  |  TimeoutDefault is the default timeout of a regular workspace|
 |`workspace.timeoutExtended`||N|  |  TimeoutExtended is the workspace timeout that a user can extend to for one workspace|
@@ -80,13 +72,9 @@ Config defines the v1 version structure of the gitpod config file
 |`authProviders[ ].name`|string|Y|  ||
 |`blockNewUsers.enabled`|bool|N|  ||
 |`blockNewUsers.passlist[ ]`|[]string|N|  |  Passlist []string `json:"passlist" validate:"min=1,unique,dive,fqdn"`|
-|`license.kind`|string|N| `secret` ||
-|`license.name`|string|Y|  ||
 |`sshGatewayHostKey.kind`|string|N| `secret` ||
 |`sshGatewayHostKey.name`|string|Y|  ||
 |`disableDefinitelyGp`|bool|N|  ||
-|`customCACert.kind`|string|N| `secret` ||
-|`customCACert.name`|string|Y|  ||
 |`dropImageRepo`|bool|N|  ||
 |`customization`||N|  ||
 |`components.proxy.service.serviceType`||N|  ||
@@ -120,6 +108,7 @@ Additional config parameters that are in experimental state
 |`experimental.workspace.wsProxy`||N|  ||
 |`experimental.workspace.contentService`||N|  ||
 |`experimental.workspace.enableProtectedSecrets`|bool|N|  ||
+|`experimental.webapp.publicApi.oidcClientJWTSigningSecretName`|string|N|  |  Name of the kubernetes secret to use for signing JWTs of OIDC flows|
 |`experimental.webapp.publicApi.stripeSecretName`|string|N|  |  Name of the kubernetes secret to use for Stripe secrets|
 |`experimental.webapp.publicApi.personalAccessTokenSigningKeySecretName`|string|N|  |  Name of the kubernetes secret to use for signature of Personal Access Tokens|
 |`experimental.webapp.server.workspaceDefaults.workspaceImage`|string|N|  |  @deprecated use workspace.workspaceImage instead|
@@ -134,13 +123,13 @@ Additional config parameters that are in experimental state
 |`experimental.webapp.server.githubApp.marketplaceName`|string|N|  ||
 |`experimental.webapp.server.githubApp.webhookSecret`|string|N|  ||
 |`experimental.webapp.server.githubApp.certSecretName`|string|N|  ||
-|`experimental.webapp.server.chargebeeSecret`|string|N|  ||
 |`experimental.webapp.server.stripeSecret`|string|N|  ||
 |`experimental.webapp.server.stripeConfig`|string|N|  ||
 |`experimental.webapp.server.disableDynamicAuthProviderLogin`|bool|N|  ||
 |`experimental.webapp.server.enableLocalApp`|bool|N|  ||
 |`experimental.webapp.server.runDbDeleter`|bool|N|  ||
 |`experimental.webapp.server.disableWorkspaceGarbageCollection`|bool|N|  ||
+|`experimental.webapp.server.disableCompleteSnapshotJob`|bool|N|  ||
 |`experimental.webapp.server.inactivityPeriodForReposInDays`|int|N|  ||
 |`experimental.webapp.server.defaultBaseImageRegistryWhitelist[ ]`|[]string|N|  |  @deprecated use containerRegistry.privateBaseImageAllowList instead|
 |`experimental.webapp.proxy.staticIP`|string|N|  ||
@@ -148,6 +137,7 @@ Additional config parameters that are in experimental state
 |`experimental.webapp.proxy.serviceType`||N|  |  @deprecated use components.proxy.service.serviceType instead|
 |`experimental.webapp.proxy.configcat.baseUrl`|string|N|  ||
 |`experimental.webapp.proxy.configcat.pollInterval`|string|N|  ||
+|`experimental.webapp.proxy.configcat.fromConfigMap`|string|N|  ||
 |`experimental.webapp.wsManagerBridge.skipSelf`|bool|N|  ||
 |`experimental.webapp.tracing.samplerType`|string|N| `const`, `probabilistic`, `rateLimiting`, `remote` |Values taken from https://github.com/jaegertracing/jaeger-client-go/blob/967f9c36f0fa5a2617c9a0993b03f9a3279fadc8/config/config.go#L71|
 |`experimental.webapp.tracing.samplerParam`|float64|N|  ||
@@ -173,14 +163,10 @@ Additional config parameters that are in experimental state
 |`experimental.webapp.stripe.individualUsagePriceIds.usd`|string|N|  ||
 |`experimental.webapp.stripe.teamUsagePriceIds.eur`|string|N|  ||
 |`experimental.webapp.stripe.teamUsagePriceIds.usd`|string|N|  ||
-|`experimental.webapp.slowDatabase`|bool|N|  ||
 |`experimental.webapp.iam`|IAMConfig|N|  ||
 |`experimental.ide.resolveLatest`|bool|N|  |  Disable resolution of latest images and use bundled latest versions instead|
 |`experimental.ide.ideProxy.serviceAnnotations`||N|  ||
 |`experimental.ide.openvsxProxy.serviceAnnotations`||N|  ||
 |`experimental.ide.ideMetrics.enabledErrorReporting`|bool|N|  ||
 |`experimental.common.podConfig`||N|  ||
-|`experimental.common.staticMessagebusPassword`|string|N|  ||
-|`experimental.common.usePodSecurityPolicies`|bool|N|  |  @deprecated PodSecurityPolicies are deprecated in k8s 1.21 and removed in 1.25|
-|`experimental.telemetry.data`||N|  ||
 |`experimental.agentSmith`||N|  ||

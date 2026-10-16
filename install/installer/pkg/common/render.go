@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"helm.sh/helm/v3/pkg/cli/values"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/pointer"
@@ -66,7 +66,6 @@ type GeneratedValues struct {
 	InternalRegistryUsername     string
 	InternalRegistryPassword     string
 	InternalRegistrySharedSecret string
-	MessageBusPassword           string
 }
 
 type RenderContext struct {
@@ -124,6 +123,18 @@ func (r *RenderContext) ImageName(repo, name, tag string) string {
 	return ref
 }
 
+func (r *RenderContext) ImageDigest(repo, name, digest string) string {
+	ref := fmt.Sprintf("%s@%s", r.RepoName(repo, name), digest)
+	pref, err := reference.ParseNamed(ref)
+	if err != nil {
+		panic(fmt.Sprintf("cannot parse image ref %s: %v", ref, err))
+	}
+	if _, ok := pref.(reference.Digested); !ok {
+		panic(fmt.Sprintf("image ref %s has no digest: %v", ref, err))
+	}
+	return ref
+}
+
 // generateValues generates the random values used throughout the context
 // todo(sje): find a way of persisting these values for updates
 func (r *RenderContext) generateValues() error {
@@ -156,18 +167,6 @@ func (r *RenderContext) generateValues() error {
 		return err
 	}
 	r.Values.InternalRegistrySharedSecret = internalRegistrySharedSecret
-
-	messageBusPassword := ""
-	_ = r.WithExperimental(func(cfg *experimental.Config) error {
-		if cfg.Common != nil {
-			messageBusPassword = cfg.Common.StaticMessagebusPassword
-		}
-		return nil
-	})
-	if messageBusPassword == "" {
-		messageBusPassword = "uq4KxOLtrA-QsDTfuwQ-"
-	}
-	r.Values.MessageBusPassword = messageBusPassword
 
 	return nil
 }

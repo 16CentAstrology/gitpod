@@ -1,49 +1,94 @@
 # this file makes this a leeway workspace
 defaultTarget: components:all
 defaultArgs:
-  imageRepoBase: "eu.gcr.io/gitpod-core-dev/build"
+  imageRepoBase: "eu.gcr.io/gitpod-dev-artifact/build"
   coreYarnLockBase: ../..
-  npmPublishTrigger: "false"
-  publishToNPM: true
-  publishToJBMarketplace: true
+  npmPublishTrigger: false
+  publishToNPM: false
+  publishToJBMarketplace: false
   localAppVersion: unknown
-  codeCommit: 164ef2430ec1b55bc2831aa2ed3df5e67ded458f
-  codeVersion: 1.74.0
+  codeCommit: ad8e28e2ea7b21673c6ade4f2fbde7ddfa23dc98
+  codeVersion: 1.111.0
   codeQuality: stable
+  codeWebExtensionCommit: 3953e8160fffa97dd4a4509542b4bf7ff9b704cd
+  xtermCommit: d547d4ff4590b66c3ea24342fc62e3afcf6b77bc
   noVerifyJBPlugin: false
-  intellijDownloadUrl: "https://download.jetbrains.com/idea/ideaIU-2022.3.tar.gz"
-  golandDownloadUrl: "https://download.jetbrains.com/go/goland-2022.3.tar.gz"
-  pycharmDownloadUrl: "https://download.jetbrains.com/python/pycharm-professional-2022.3.tar.gz"
-  phpstormDownloadUrl: "https://download.jetbrains.com/webide/PhpStorm-2022.3.tar.gz"
-  rubymineDownloadUrl: "https://download.jetbrains.com/ruby/RubyMine-2022.3.tar.gz"
-  webstormDownloadUrl: "https://download.jetbrains.com/webstorm/WebStorm-2022.3.tar.gz"
-  riderDownloadUrl: "https://download.jetbrains.com/rider/JetBrains.Rider-2022.3.tar.gz"
-  clionDownloadUrl: "https://download.jetbrains.com/cpp/CLion-2022.3.tar.gz"
+  intellijDownloadUrl: "https://download.jetbrains.com/idea/ideaIU-2025.1.1.1.tar.gz"
+  golandDownloadUrl: "https://download.jetbrains.com/go/goland-2025.1.1.tar.gz"
+  pycharmDownloadUrl: "https://download.jetbrains.com/python/pycharm-2025.1.1.1.tar.gz"
+  phpstormDownloadUrl: "https://download.jetbrains.com/webide/PhpStorm-2025.1.1.tar.gz"
+  rubymineDownloadUrl: "https://download.jetbrains.com/ruby/RubyMine-2025.1.1.tar.gz"
+  webstormDownloadUrl: "https://download.jetbrains.com/webstorm/WebStorm-2025.1.1.tar.gz"
+  riderDownloadUrl: "https://download.jetbrains.com/rider/JetBrains.Rider-2024.1.4.tar.gz"
+  clionDownloadUrl: "https://download.jetbrains.com/cpp/CLion-2025.1.1.tar.gz"
+  rustroverDownloadUrl: "https://download.jetbrains.com/rustrover/RustRover-2025.1.2.tar.gz"
   jbBackendVersion: "latest"
-  REPLICATED_API_TOKEN: ""
-  REPLICATED_APP: ""
+  dockerVersion: "29.5.3"
+  dockerComposeVersion: "2.40.3"
+  ipfsKuboVersion: "v0.18.0"
+  ipfsClusterVersion: "v1.0.8"
+  schedulerExtenderVersion: "c1925d8"
 provenance:
   enabled: true
   slsa: true
+sbom:
+  enabled: true
+  ignoreVulnerabilities:
+    - vulnerability: GHSA-fx4w-v43j-vc45
+      reason: |
+        This vulnerability in TypeORM's findOne / findOneOrFail functions can improperly interpret a crafted JSON object
+        and concatenate it into raw SQL, potentially allowing SQL injection attacks.
+
+        In Gitpod’s usage, TypeORM is not exposed to arbitrary user input. For example, DB migrations run preset queries;
+        the server/bridge code does not hand raw JSON from external sources to findOne. Therefore, there is no path for
+        injecting malicious JSON into a query, rendering the vulnerability non-exploitable.
+    - vulnerability: GHSA-2jcg-qqmg-46q6
+      reason: |
+        This is a false positive. See https://github.com/browserify/resolve/issues/303
+    - vulnerability: GO-2026-4858
+      reason: |
+        This is a false positive for ghcr.io/gitpod-io/buildkit:v0.20.1-gitpod.8.
+        The custom Gitpod BuildKit image backports the upstream v0.28.1 fix for
+        GHSA-4c29-8rgm-jvjj / CVE-2026-33747, but grype matches the emitted
+        github.com/moby/buildkit module version and still reports v0.20.1-gitpod.8
+        as vulnerable.
+        This workspace-level ignore is global for the vulnerability ID; keep it
+        limited to this known false positive and scope or remove it once artifact
+        scoped suppressions are available here.
+    - vulnerability: GO-2026-5064
+      reason: |
+        This advisory applies to containerd's CRI checkpoint restore path, which
+        trusts CDI annotations from checkpoint metadata. Gitpod's affected binaries
+        use containerd only as clients or for content, image, and registry helpers;
+        they do not embed or expose the containerd CRI checkpoint server. The
+        vulnerable path is therefore not present or reachable in these artifacts.
+    - vulnerability: GO-2026-5338
+      reason: |
+        This advisory applies to containerd's CRI checkpoint import path, which can
+        assign untrusted image references to local tags. Gitpod's affected binaries
+        use containerd only as clients or for content, image, and registry helpers;
+        they do not embed or expose the containerd CRI checkpoint server. The
+        vulnerable path is therefore not present or reachable in these artifacts.
+environmentManifest:
+  - name: "go"
+    command: ["sh", "-c", "go version | sed s/arm/amd/"]
+  - name: "arch"
+    command: ["sh", "-c", "echo amd64"]
 defaultVariant:
+  env:
+    - GOARCH=amd64
+    - DOCKER_DEFAULT_PLATFORM=linux/amd64
+    - NODE_OPTIONS=--max_old_space_size=8192
+    - LEEWAY_BUILD=true
   srcs:
     exclude:
       # Make sure we don't include node_modules/**/*.ts by accident
       - "**/node_modules/**"
   config:
     go:
-      lintCommand: ["sh", "-c", "golangci-lint run --disable govet,errcheck,typecheck,staticcheck,structcheck --allow-parallel-runners --timeout 5m"]
-variants:
-  - name: oss
-    srcs:
-      exclude:
-        - "**/ee"
-        - "**/ee/**"
-        - "**/*_ee.*"
-        - "**/*_ee_*.*"
-    env:
-      - GITPOD_OSS_BUILD=true
-    config:
-      go:
-        buildTags:
-          - -tags oss
+      lintCommand:
+        [
+          "sh",
+          "-c",
+          "golangci-lint run --disable govet,errcheck,staticcheck --allow-parallel-runners --timeout 15m",
+        ]

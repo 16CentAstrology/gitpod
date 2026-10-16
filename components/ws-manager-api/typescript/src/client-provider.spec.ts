@@ -17,7 +17,7 @@ import {
 import { WorkspaceCluster, WorkspaceClusterWoTLS } from "@gitpod/gitpod-protocol/lib/workspace-cluster";
 import { User, Workspace, WorkspaceInstance } from "@gitpod/gitpod-protocol";
 import { PromisifiedWorkspaceManagerClient } from ".";
-import { Constraint, constraintHasPermissions, ExtendedUser, intersect, invert } from "./constraints";
+import { Constraint, ConstraintArgs, constraintHasPermissions, intersect, invert } from "./constraints";
 const expect = chai.expect;
 
 @suite
@@ -39,7 +39,7 @@ class TestClientProvider {
                         state: "cordoned",
                         url: "",
                         admissionConstraints: [],
-                        applicationCluster: "xx01",
+                        region: "north-america",
                     },
                     {
                         name: "c2",
@@ -49,7 +49,7 @@ class TestClientProvider {
                         state: "cordoned",
                         url: "",
                         admissionConstraints: [],
-                        applicationCluster: "xx01",
+                        region: "north-america",
                     },
                     {
                         name: "c3",
@@ -59,7 +59,7 @@ class TestClientProvider {
                         state: "cordoned",
                         url: "",
                         admissionConstraints: [],
-                        applicationCluster: "xx01",
+                        region: "north-america",
                     },
                     {
                         name: "a1",
@@ -69,7 +69,7 @@ class TestClientProvider {
                         state: "available",
                         url: "",
                         admissionConstraints: [],
-                        applicationCluster: "xx01",
+                        region: "north-america",
                     },
                     {
                         name: "a2",
@@ -79,7 +79,7 @@ class TestClientProvider {
                         state: "available",
                         url: "",
                         admissionConstraints: [],
-                        applicationCluster: "xx01",
+                        region: "north-america",
                     },
                     {
                         name: "a3",
@@ -89,7 +89,7 @@ class TestClientProvider {
                         state: "available",
                         url: "",
                         admissionConstraints: [],
-                        applicationCluster: "xx01",
+                        region: "europe",
                     },
                     {
                         name: "con1",
@@ -99,7 +99,7 @@ class TestClientProvider {
                         state: "available",
                         url: "",
                         admissionConstraints: [{ type: "has-permission", permission: "new-workspace-cluster" }],
-                        applicationCluster: "xx01",
+                        region: "europe",
                     },
                     {
                         name: "con2",
@@ -109,9 +109,9 @@ class TestClientProvider {
                         state: "available",
                         url: "",
                         admissionConstraints: [
-                            { type: "has-permission", permission: "monitor" }, // This is meant to representent a permission that does not take special predence (cmp. constraints.ts)
+                            { type: "has-permission", permission: "admin-workspace-content" }, // This is meant to represent a permission that does not take special precedence (cmp. constraints.ts)
                         ],
-                        applicationCluster: "xx01",
+                        region: "europe",
                     },
                 ];
                 return <WorkspaceManagerClientProviderSource>{
@@ -127,11 +127,7 @@ class TestClientProvider {
         this.provider = c.get(WorkspaceManagerClientProvider);
 
         // we don't actually want to try and connect here
-        this.provider.get = async (
-            name: string,
-            applicationCluster: string,
-            grpcOptions?: object,
-        ): Promise<PromisifiedWorkspaceManagerClient> => {
+        this.provider.get = async (name: string, grpcOptions?: object): Promise<PromisifiedWorkspaceManagerClient> => {
             return {} as PromisifiedWorkspaceManagerClient;
         };
     }
@@ -140,13 +136,12 @@ class TestClientProvider {
     public async getStartClusterSets() {
         await this.expectInstallations(
             [["a2", "a3"]],
-            await this.provider.getStartClusterSets("xx01", {} as User, {} as Workspace, {} as WorkspaceInstance),
+            await this.provider.getStartClusterSets({} as User, {} as Workspace, {} as WorkspaceInstance),
             "default case",
         );
         await this.expectInstallations(
             [["con1"], ["a2", "a3", "con1"]],
             await this.provider.getStartClusterSets(
-                "xx01",
                 { rolesOrPermissions: ["new-workspace-cluster"] } as User,
                 {} as Workspace,
                 {} as WorkspaceInstance,
@@ -156,8 +151,7 @@ class TestClientProvider {
         await this.expectInstallations(
             [["a2", "a3", "con2"]],
             await this.provider.getStartClusterSets(
-                "xx01",
-                { rolesOrPermissions: ["monitor"] } as User,
+                { rolesOrPermissions: ["admin-workspace-content"] } as User,
                 {} as Workspace,
                 {} as WorkspaceInstance,
             ),
@@ -165,8 +159,13 @@ class TestClientProvider {
         );
         await this.expectInstallations(
             [["a2", "a3"]],
-            await this.provider.getStartClusterSets("xx01", {} as User, {} as Workspace, {} as WorkspaceInstance),
+            await this.provider.getStartClusterSets({} as User, {} as Workspace, {} as WorkspaceInstance),
             "cluster has permission w/o precedence, user NOT",
+        );
+        await this.expectInstallations(
+            [["a3"], ["a2"]],
+            await this.provider.getStartClusterSets({} as User, {} as Workspace, {} as WorkspaceInstance, "europe"),
+            "regional cluster set",
         );
     }
 
@@ -188,12 +187,7 @@ class TestClientProvider {
             "eveything U everything == everything",
         ).to.be.eql(materializeConstraint(everything));
 
-        const something = (
-            all: WorkspaceClusterWoTLS[],
-            user: ExtendedUser,
-            workspace: Workspace,
-            instance: WorkspaceInstance,
-        ) => all.filter((c) => c.name === "a1");
+        const something = (all: WorkspaceClusterWoTLS[], args: ConstraintArgs) => all.filter((c) => c.name === "a1");
         expect(materializeConstraint(intersect(something, nothing)), "something U nothing == nothing").to.be.empty;
         expect(materializeConstraint(intersect(everything, something)), "eveything U something == something").to.be.eql(
             materializeConstraint(something),
@@ -219,20 +213,18 @@ class TestClientProvider {
             { name: "b1" } as WorkspaceClusterWoTLS,
         ];
         expect(
-            constraintHasPermissions("monitor")(
-                clusters,
-                {} as ExtendedUser,
-                {} as Workspace,
-                {} as WorkspaceInstance,
-            ).map((c) => c.name),
+            constraintHasPermissions("admin-workspace-content")(clusters, {
+                user: {} as User,
+                workspace: {} as Workspace,
+                instance: {} as WorkspaceInstance,
+            }).map((c) => c.name),
         ).to.be.empty;
         expect(
-            constraintHasPermissions("new-workspace-cluster")(
-                clusters,
-                { rolesOrPermissions: ["new-workspace-cluster"] } as ExtendedUser,
-                {} as Workspace,
-                {} as WorkspaceInstance,
-            ).map((c) => c.name),
+            constraintHasPermissions("new-workspace-cluster")(clusters, {
+                user: { rolesOrPermissions: ["new-workspace-cluster"] } as User,
+                workspace: {} as Workspace,
+                instance: {} as WorkspaceInstance,
+            }).map((c) => c.name),
         ).to.be.eql(["a1"]);
     }
 
@@ -260,18 +252,8 @@ class TestClientProvider {
     }
 }
 
-const everything = (
-    all: WorkspaceClusterWoTLS[],
-    user: ExtendedUser,
-    workspace: Workspace,
-    instance: WorkspaceInstance,
-) => all;
-const nothing = (
-    all: WorkspaceClusterWoTLS[],
-    user: ExtendedUser,
-    workspace: Workspace,
-    instance: WorkspaceInstance,
-) => [];
+const everything = (all: WorkspaceClusterWoTLS[], args: ConstraintArgs) => all;
+const nothing = (all: WorkspaceClusterWoTLS[], args: ConstraintArgs) => [];
 
 function materializeConstraint(c: Constraint): string[] {
     const cluster: WorkspaceClusterWoTLS[] = [
@@ -281,7 +263,9 @@ function materializeConstraint(c: Constraint): string[] {
         { name: "a4" } as WorkspaceClusterWoTLS,
     ];
 
-    return c(cluster, {} as ExtendedUser, {} as Workspace, {} as WorkspaceInstance).map((cluster) => cluster.name);
+    return c(cluster, { user: {} as User, workspace: {} as Workspace, instance: {} as WorkspaceInstance }).map(
+        (cluster) => cluster.name,
+    );
 }
 
 module.exports = new TestClientProvider();
