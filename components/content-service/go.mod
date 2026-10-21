@@ -1,6 +1,6 @@
 module github.com/gitpod-io/gitpod/content-service
 
-go 1.19
+go 1.24
 
 require (
 	cloud.google.com/go/storage v1.27.0
@@ -71,7 +71,7 @@ require (
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/jtolds/gls v4.20.0+incompatible // indirect
-	github.com/klauspost/compress v1.13.5 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/klauspost/cpuid v1.3.1 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/minio/md5-simd v1.1.0 // indirect
