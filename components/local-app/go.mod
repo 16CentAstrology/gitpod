@@ -1,6 +1,6 @@
 module github.com/gitpod-io/local-app
 
-go 1.19
+go 1.24
 
 require (
 	github.com/desertbit/timer v0.0.0-20180107155436-c41aec40b27f // indirect
@@ -35,7 +35,7 @@ require (
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.11.3 // indirect
-	github.com/klauspost/compress v1.10.3 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/russross/blackfriday/v2 v2.0.1 // indirect
 	github.com/shurcooL/sanitized_anchor_name v1.0.0 // indirect
 	github.com/sourcegraph/jsonrpc2 v0.0.0-20200429184054-15c2290dcb37 // indirect
