@@ -2,13 +2,11 @@
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM alpine:3.16
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7
 
 # Ensure latest packages are present, like security updates.
 RUN  apk upgrade --no-cache \
-  # bash: for devx
-  # tar: make kubectl cp work
-  && apk add --no-cache ca-certificates bash tar
+  && apk add --no-cache ca-certificates
 
 COPY components-ide-service--app/ide-service /app/ide-service
 

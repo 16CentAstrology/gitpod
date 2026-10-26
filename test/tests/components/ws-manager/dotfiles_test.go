@@ -29,10 +29,10 @@ func TestDotfiles(t *testing.T) {
 	integration.SkipWithoutUsername(t, username)
 	integration.SkipWithoutUserToken(t, userToken)
 
-	f := features.New("dotfiles").WithLabel("component", "ws-manager").Assess("ensure dotfiles are loaded", func(_ context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+	f := features.New("dotfiles").WithLabel("component", "ws-manager").Assess("ensure dotfiles are loaded", func(testCtx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		t.Parallel()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(testCtx, 5*time.Minute)
 		defer cancel()
 
 		api := integration.NewComponentAPI(ctx, cfg.Namespace(), kubeconfig, cfg.Client())
@@ -45,12 +45,15 @@ func TestDotfiles(t *testing.T) {
 			t.Fatal(err)
 		}
 
+		// Scopes should larger than https://github.com/gitpod-io/gitpod/blob/main/components/supervisor/pkg/serverapi/publicapi.go#L99-L109
 		tokenId, err := api.CreateOAuth2Token(username, []string{
 			"function:getToken",
 			"function:openPort",
 			"function:getOpenPorts",
 			"function:guessGitTokenScopes",
 			"function:getWorkspace",
+			"function:sendHeartBeat",
+			"function:trackEvent",
 			"resource:token::*::get",
 		})
 		if err != nil {
@@ -69,8 +72,8 @@ func TestDotfiles(t *testing.T) {
 						"token": "%v",
 						"kind": "gitpod",
 						"host": "%v",
-						"scope": ["function:getToken", "function:openPort", "function:getOpenPorts", "function:guessGitTokenScopes", "getWorkspace", "resource:token::*::get"],
-						"expiryDate": "2022-10-26T10:38:05.232Z",
+						"scope": ["function:getToken", "function:openPort", "function:sendHeartBeat", "function:getOpenPorts", "function:guessGitTokenScopes", "function:getWorkspace", "function:trackEvent", "resource:token::*::get"],
+						"expiryDate": "2026-10-26T10:38:05.232Z",
 						"reuse": 4
 					}]`, tokenId, getHostUrl(ctx, t, cfg.Client(), cfg.Namespace())),
 				},
@@ -123,7 +126,7 @@ func TestDotfiles(t *testing.T) {
 
 		assertDotfiles(t, rsa)
 
-		return ctx
+		return testCtx
 	}).Feature()
 
 	testEnv.Test(t, f)
@@ -173,6 +176,15 @@ func assertDotfiles(t *testing.T, rsa *integration.RpcClient) error {
 	}
 
 	if len(dotfiles) > 0 {
+		var cat agent.ExecResponse
+		err := rsa.Call("WorkspaceAgent.Exec", &agent.ExecRequest{
+			Dir:     "/",
+			Command: "cat",
+			Args:    []string{"/home/gitpod/.dotfiles.log"},
+		}, &cat)
+		if err == nil {
+			t.Fatalf("dotfiles were not installed successfully: %+v, .dotfiles.log: %s", dotfiles, cat.Stdout)
+		}
 		t.Fatalf("dotfiles were not installed successfully: %+v", dotfiles)
 	}
 

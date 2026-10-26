@@ -1,4 +1,4 @@
-image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:mads-hartmann-don-t-store-leeway-15060.0
+image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:main-gha.34606
 workspaceLocation: gitpod/gitpod-ws.code-workspace
 checkoutLocation: gitpod
 ports:
@@ -42,6 +42,15 @@ tasks:
         gp env -u GCP_ADC_FILE
       fi
       exit 0
+  - name: Install `gitpod` CLI
+    command: |
+      leeway run components/local-app:install-cli
+      leeway run components/local-app:cli-completion
+      exit 0
+  - name: Setup GitHub CLI Auth
+    init: |
+      bash /workspace/gitpod/dev/setup-github-auth.sh
+      exit 0
   # This task takes care of configuring your workspace so it can manage and interact
   # with preview environments.
   - name: Preview environment configuration
@@ -60,12 +69,21 @@ tasks:
       leeway exec --package components/ide/jetbrains/backend-plugin:plugin-latest --package components/ide/jetbrains/gateway-plugin:publish-latest --parallel -- ./gradlew buildPlugin
   - name: TypeScript
     init: yarn --network-timeout 100000 && yarn build
+  - name: Install pre-commit hooks
+    init: |
+      pre-commit install --install-hooks
+      exit 0
   - name: Go
-    before: pre-commit install --install-hooks
     init: |
       ./components/gitpod-protocol/go/scripts/generate-config.sh
       leeway exec --filter-type go -v -- go mod verify
-    openMode: split-right
+  - name: claude code
+    command: |
+      if [[ -z "${CLAUDE_JSON}" ]]; then
+        echo "Skipping setup for Claude Code. Setup a CLAUDE_JSON variable to reuse Claude Code in workspaces."
+      else
+        echo $CLAUDE_JSON > ~/.claude.json
+      fi
 vscode:
   extensions:
     - EditorConfig.EditorConfig
@@ -81,7 +99,8 @@ vscode:
     - fwcd.kotlin
     - dbaeumer.vscode-eslint
     - esbenp.prettier-vscode
+    - akosyakov.gitpod-monitor
+    - hbenl.vscode-mocha-test-adapter
 jetbrains:
-  goland:
-    prebuilds:
-      version: stable
+  intellij:
+    vmoptions: -Xmx4g

@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io/ioutil"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,6 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	"github.com/gitpod-io/gitpod/common-go/log"
-	"github.com/gitpod-io/gitpod/ws-daemon/pkg/content"
 	"github.com/gitpod-io/gitpod/ws-daemon/pkg/dispatch"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -102,8 +102,24 @@ func (c *MarkUnmountFallback) WorkspaceUpdated(ctx context.Context, ws *dispatch
 	}
 	ttl := time.Duration(gracePeriod)*time.Second + propagationGracePeriod
 
+	dispatch.GetDispatchWaitGroup(ctx).Add(1)
 	go func() {
-		time.Sleep(ttl)
+		defer dispatch.GetDispatchWaitGroup(ctx).Done()
+
+		defer func() {
+			// We expect the container to be gone now. Don't keep its referenec in memory.
+			c.mu.Lock()
+			delete(c.handled, ws.InstanceID)
+			c.mu.Unlock()
+		}()
+
+		wait := time.NewTicker(ttl)
+		defer wait.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-wait.C:
+		}
 
 		dsp := dispatch.GetFromContext(ctx)
 		if !dsp.WorkspaceExistsOnNode(ws.InstanceID) {
@@ -112,17 +128,12 @@ func (c *MarkUnmountFallback) WorkspaceUpdated(ctx context.Context, ws *dispatch
 		}
 
 		err := unmountMark(ws.InstanceID)
-		if err != nil {
+		if err != nil && errors.Is(err, context.Canceled) {
 			log.WithFields(ws.OWI()).WithError(err).Error("cannot unmount mark mount from within ws-daemon")
 			c.activityCounter.WithLabelValues("false").Inc()
 		} else {
 			c.activityCounter.WithLabelValues("true").Inc()
 		}
-
-		// We expect the container to be gone now. Don't keep its referenec in memory.
-		c.mu.Lock()
-		delete(c.handled, ws.InstanceID)
-		c.mu.Unlock()
 	}()
 
 	return nil
@@ -136,7 +147,7 @@ func unmountMark(instanceID string) error {
 		return xerrors.Errorf("cannot read /proc/mounts: %w", err)
 	}
 
-	dir := content.ServiceDirName(instanceID)
+	dir := instanceID + "-daemon"
 	path := fromPartialMount(filepath.Join(dir, "mark"), mounts)
 	// empty path means no mount found
 	if len(path) == 0 {
@@ -144,7 +155,10 @@ func unmountMark(instanceID string) error {
 	}
 
 	// in some scenarios we need to wait for the unmount
-	var errorFn = func(err error) bool {
+	var canRetryFn = func(err error) bool {
+		if !strings.Contains(err.Error(), "device or resource busy") {
+			log.WithError(err).WithFields(log.OWI("", "", instanceID)).Info("Will not retry unmount mark")
+		}
 		return strings.Contains(err.Error(), "device or resource busy")
 	}
 
@@ -158,7 +172,7 @@ func unmountMark(instanceID string) error {
 				Duration: 1 * time.Second,
 				Factor:   5.0,
 				Jitter:   0.1,
-			}, errorFn, func() error {
+			}, canRetryFn, func() error {
 				return unix.Unmount(p, 0)
 			})
 		})

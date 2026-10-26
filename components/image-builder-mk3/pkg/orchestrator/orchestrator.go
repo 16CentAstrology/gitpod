@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,8 +19,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/distribution/reference"
+	"github.com/aws/aws-sdk-go-v2/service/ecr"
+	"github.com/distribution/reference"
 	"github.com/google/uuid"
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/opentracing/opentracing-go"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/xerrors"
@@ -28,8 +31,8 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	common_grpc "github.com/gitpod-io/gitpod/common-go/grpc"
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/tracing"
@@ -56,17 +59,26 @@ const (
 
 // NewOrchestratingBuilder creates a new orchestrating image builder
 func NewOrchestratingBuilder(cfg config.Configuration) (res *Orchestrator, err error) {
-	var authentication auth.RegistryAuthenticator
+	var authentication auth.CompositeAuth
 	if cfg.PullSecretFile != "" {
 		fn := cfg.PullSecretFile
 		if tproot := os.Getenv("TELEPRESENCE_ROOT"); tproot != "" {
 			fn = filepath.Join(tproot, fn)
 		}
 
-		authentication, err = auth.NewDockerConfigFileAuth(fn)
+		ath, err := auth.NewDockerConfigFileAuth(fn)
 		if err != nil {
-			return
+			return nil, err
 		}
+		authentication = append(authentication, ath)
+	}
+	if cfg.EnableAdditionalECRAuth {
+		awsCfg, err := awsconfig.LoadDefaultConfig(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		ecrc := ecr.NewFromConfig(awsCfg)
+		authentication = append(authentication, auth.NewECRAuthenticator(ecrc))
 	}
 
 	var wsman wsmanapi.WorkspaceManagerClient
@@ -96,6 +108,8 @@ func NewOrchestratingBuilder(cfg config.Configuration) (res *Orchestrator, err e
 		wsman = wsmanapi.NewWorkspaceManagerClient(conn)
 	}
 
+	retryResolveClient := NewRetryTimeoutClient()
+
 	o := &Orchestrator{
 		Config: cfg,
 		Auth:   authentication,
@@ -104,6 +118,8 @@ func NewOrchestratingBuilder(cfg config.Configuration) (res *Orchestrator, err e
 			WorkspaceImageRepository: cfg.WorkspaceImageRepository,
 		},
 		RefResolver: &resolve.StandaloneRefResolver{},
+
+		retryResolveClient: retryResolveClient,
 
 		wsman:         wsman,
 		buildListener: make(map[string]map[buildListener]struct{}),
@@ -122,6 +138,8 @@ type Orchestrator struct {
 	Auth         auth.RegistryAuthenticator
 	AuthResolver auth.Resolver
 	RefResolver  resolve.DockerRefResolver
+
+	retryResolveClient *http.Client
 
 	wsman wsmanapi.WorkspaceManagerClient
 
@@ -149,15 +167,9 @@ func (o *Orchestrator) ResolveBaseImage(ctx context.Context, req *protocol.Resol
 	defer tracing.FinishSpan(span, &err)
 	tracing.LogRequestSafe(span, req)
 
-	reqs, _ := protojson.Marshal(req)
-	safeReqs, _ := log.RedactJSON(reqs)
-	safeReqsLog := make(map[string]interface{})
-	_ = json.Unmarshal(safeReqs, &safeReqsLog)
-	log.WithFields(safeReqsLog).Debug("ResolveBaseImage")
+	reqauth := o.AuthResolver.ResolveRequestAuth(ctx, req.Auth)
 
-	reqauth := o.AuthResolver.ResolveRequestAuth(req.Auth)
-
-	refstr, err := o.getAbsoluteImageRef(ctx, req.Ref, reqauth)
+	refstr, err := o.getAbsoluteImageRef(ctx, req.Ref, reqauth, req.GetUseRetryClient())
 	if err != nil {
 		return nil, err
 	}
@@ -173,14 +185,9 @@ func (o *Orchestrator) ResolveWorkspaceImage(ctx context.Context, req *protocol.
 	defer tracing.FinishSpan(span, &err)
 	tracing.LogRequestSafe(span, req)
 
-	reqs, _ := protojson.Marshal(req)
-	safeReqs, _ := log.RedactJSON(reqs)
-	safeReqsLog := make(map[string]interface{})
-	_ = json.Unmarshal(safeReqs, &safeReqsLog)
-	log.WithFields(safeReqsLog).Debug("ResolveWorkspaceImage")
-
-	reqauth := o.AuthResolver.ResolveRequestAuth(req.Auth)
-	baseref, err := o.getBaseImageRef(ctx, req.Source, reqauth)
+	reqauth := o.AuthResolver.ResolveRequestAuth(ctx, req.Auth)
+	useRetryClient := req.GetUseRetryClient()
+	baseref, err := o.getBaseImageRef(ctx, req.Source, reqauth, useRetryClient)
 	if _, ok := status.FromError(err); err != nil && ok {
 		return nil, err
 	}
@@ -195,11 +202,11 @@ func (o *Orchestrator) ResolveWorkspaceImage(ctx context.Context, req *protocol.
 
 	// to check if the image exists we must have access to the image caching registry and the refstr we check here does not come
 	// from the user. Thus we can safely use auth.AllowedAuthForAll here.
-	auth, err := auth.AllowedAuthForAll().GetAuthFor(o.Auth, refstr)
+	auth, err := auth.AllowedAuthForAll().GetAuthFor(ctx, o.Auth, refstr)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "cannot get workspace image authentication: %v", err)
 	}
-	exists, err := o.checkImageExists(ctx, refstr, auth)
+	exists, err := o.checkImageExists(ctx, refstr, auth, useRetryClient)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "cannot resolve workspace image: %s", err.Error())
 	}
@@ -229,45 +236,87 @@ func (o *Orchestrator) Build(req *protocol.BuildRequest, resp protocol.ImageBuil
 	}
 
 	// resolve build request authentication
-	reqauth := o.AuthResolver.ResolveRequestAuth(req.Auth)
+	reqauth := o.AuthResolver.ResolveRequestAuth(ctx, req.Auth)
+	useRetryClient := req.GetUseRetryClient()
+	log.WithField("forceRebuild", req.GetForceRebuild()).WithField("baseImageNameResolved", req.BaseImageNameResolved).WithField("useRetryClient", useRetryClient).Info("build request")
 
-	baseref, err := o.getBaseImageRef(ctx, req.Source, reqauth)
+	// resolve to ref to baseImageNameResolved (if it exists)
+	if req.BaseImageNameResolved != "" && !req.GetForceRebuild() {
+		if req.Auth != nil && req.Auth.GetSelective() != nil {
+			// allow access to baseImage repository so we can look it up later
+			req.Auth.GetSelective().AllowBaserep = true
+			reqauth = o.AuthResolver.ResolveRequestAuth(ctx, req.Auth)
+		}
+
+		wsrefstr, err := o.getWorkspaceImageRef(ctx, req.BaseImageNameResolved)
+		if err != nil {
+			return status.Errorf(codes.Internal, "cannot produce workspace image ref: %q", err)
+		}
+		wsrefAuth, err := reqauth.GetAuthFor(ctx, o.Auth, wsrefstr)
+		if err != nil {
+			return status.Errorf(codes.Internal, "cannot get workspace image authentication: %q", err)
+		}
+
+		// check if needs build -> early return
+		exists, err := o.checkImageExists(ctx, wsrefstr, wsrefAuth, useRetryClient)
+		if err != nil {
+			return status.Errorf(codes.Internal, "cannot check if image is already built: %q", err)
+		}
+		if exists {
+			err = resp.Send(&protocol.BuildResponse{
+				Status:  protocol.BuildStatus_done_success,
+				Ref:     wsrefstr,
+				BaseRef: req.BaseImageNameResolved,
+			})
+			if err != nil {
+				return handleFailedBuildStreamResponse(err, "cannot send build response")
+			}
+			return nil
+		}
+		baseref, err := o.getAbsoluteImageRef(ctx, req.BaseImageNameResolved, reqauth, useRetryClient)
+		if err == nil {
+			req.Source.From = &protocol.BuildSource_Ref{
+				Ref: &protocol.BuildSourceReference{
+					Ref: baseref,
+				},
+			}
+		}
+	}
+
+	log.Info("falling through to old way of building")
+	baseref, err := o.getBaseImageRef(ctx, req.Source, reqauth, useRetryClient)
 	if _, ok := status.FromError(err); err != nil && ok {
+		log.WithError(err).Error("gRPC status error")
 		return err
 	}
 	if err != nil {
+		log.WithError(err).Error("cannot get base image ref")
 		return status.Errorf(codes.Internal, "cannot resolve base image: %s", err.Error())
 	}
+
 	wsrefstr, err := o.getWorkspaceImageRef(ctx, baseref)
 	if err != nil {
 		return status.Errorf(codes.Internal, "cannot produce workspace image ref: %q", err)
 	}
-	wsrefAuth, err := auth.AllowedAuthForAll().GetAuthFor(o.Auth, wsrefstr)
+	wsrefAuth, err := auth.AllowedAuthForAll().GetAuthFor(ctx, o.Auth, wsrefstr)
 	if err != nil {
 		return status.Errorf(codes.Internal, "cannot get workspace image authentication: %q", err)
 	}
 
 	// check if needs build -> early return
-	exists, err := o.checkImageExists(ctx, wsrefstr, wsrefAuth)
+	exists, err := o.checkImageExists(ctx, wsrefstr, wsrefAuth, req.GetUseRetryClient())
 	if err != nil {
 		return status.Errorf(codes.Internal, "cannot check if image is already built: %q", err)
 	}
 	if exists && !req.GetForceRebuild() {
-		// If the workspace image exists, so should the baseimage if we've built it.
-		// If we didn't build it and the base image doesn't exist anymore, getWorkspaceImageRef will have failed to resolve the baseref.
-		baserefAbsolute, err := o.getAbsoluteImageRef(ctx, baseref, auth.AllowedAuthForAll())
-		if err != nil {
-			return err
-		}
-
 		// image has already been built - no need for us to start building
 		err = resp.Send(&protocol.BuildResponse{
 			Status:  protocol.BuildStatus_done_success,
 			Ref:     wsrefstr,
-			BaseRef: baserefAbsolute,
+			BaseRef: baseref,
 		})
 		if err != nil {
-			return err
+			return handleFailedBuildStreamResponse(err, "cannot send build response")
 		}
 		return nil
 	}
@@ -282,11 +331,12 @@ func (o *Orchestrator) Build(req *protocol.BuildRequest, resp protocol.ImageBuil
 
 	randomUUID, err := uuid.NewRandom()
 	if err != nil {
-		return
+		return status.Errorf(codes.Internal, "failed to generate build ID: %v", err)
 	}
+	buildID := randomUUID.String()
+	log := log.WithField("buildID", buildID)
 
 	var (
-		buildID        = randomUUID.String()
 		buildBase      = "false"
 		contextPath    = "."
 		dockerfilePath = "Dockerfile"
@@ -326,9 +376,9 @@ func (o *Orchestrator) Build(req *protocol.BuildRequest, resp protocol.ImageBuil
 		return false
 	}
 
-	pbaseref, err := reference.Parse(baseref)
+	pbaseref, err := reference.ParseNormalizedNamed(baseref)
 	if err != nil {
-		return xerrors.Errorf("cannot parse baseref: %v", err)
+		return status.Errorf(codes.InvalidArgument, "cannot parse baseref: %v", err)
 	}
 	bobBaseref := "localhost:8080/base"
 	if r, ok := pbaseref.(reference.Digested); ok {
@@ -339,11 +389,12 @@ func (o *Orchestrator) Build(req *protocol.BuildRequest, resp protocol.ImageBuil
 	wsref, err := reference.ParseNamed(wsrefstr)
 	var additionalAuth []byte
 	if err == nil {
-		additionalAuth, err = json.Marshal(reqauth.GetImageBuildAuthFor([]string{
+		ath := reqauth.GetImageBuildAuthFor(ctx, o.Auth, []string{reference.Domain(pbaseref), auth.DummyECRRegistryDomain}, []string{
 			reference.Domain(wsref),
-		}))
+		})
+		additionalAuth, err = json.Marshal(ath)
 		if err != nil {
-			return xerrors.Errorf("cannot marshal additional auth: %w", err)
+			return status.Errorf(codes.InvalidArgument, "cannot marshal additional auth: %v", err)
 		}
 	}
 
@@ -362,10 +413,9 @@ func (o *Orchestrator) Build(req *protocol.BuildRequest, resp protocol.ImageBuil
 				Owner: req.GetTriggeredBy(),
 			},
 			Spec: &wsmanapi.StartWorkspaceSpec{
-				Initializer:        initializer,
-				Timeout:            maxBuildRuntime.String(),
-				WorkspaceImage:     o.Config.BuilderImage,
-				DeprecatedIdeImage: o.Config.BuilderImage,
+				Initializer:    initializer,
+				Timeout:        maxBuildRuntime.String(),
+				WorkspaceImage: o.Config.BuilderImage,
 				IdeImage: &wsmanapi.IDEImage{
 					WebRef:        o.Config.BuilderImage,
 					SupervisorRef: req.SupervisorRef,
@@ -392,7 +442,7 @@ func (o *Orchestrator) Build(req *protocol.BuildRequest, resp protocol.ImageBuil
 						Name:  "WORKSPACEKIT_BOBPROXY_ADDITIONALAUTH",
 						Value: string(additionalAuth),
 					},
-					{Name: "SUPERVISOR_DEBUG_ENABLE", Value: fmt.Sprintf("%v", log.Log.Logger.IsLevelEnabled(logrus.DebugLevel))},
+					{Name: "SUPERVISOR_DEBUG_ENABLE", Value: fmt.Sprintf("%v", log.Logger.IsLevelEnabled(logrus.DebugLevel))},
 				},
 			},
 			Type: wsmanapi.WorkspaceType_IMAGEBUILD,
@@ -424,7 +474,7 @@ func (o *Orchestrator) Build(req *protocol.BuildRequest, resp protocol.ImageBuil
 		// "cannot pull from reg.gitpod.io" error message. Instead the image-build should fail properly.
 		// To do this, we resolve the built image afterwards to ensure it was actually built.
 		if update.Status == protocol.BuildStatus_done_success {
-			exists, err := o.checkImageExists(ctx, wsrefstr, wsrefAuth)
+			exists, err := o.checkImageExists(ctx, wsrefstr, wsrefAuth, useRetryClient)
 			if err != nil {
 				update.Status = protocol.BuildStatus_done_failure
 				update.Message = fmt.Sprintf("cannot check if workspace image exists after the build: %v", err)
@@ -436,14 +486,17 @@ func (o *Orchestrator) Build(req *protocol.BuildRequest, resp protocol.ImageBuil
 
 		err := resp.Send(update)
 		if err != nil {
-			log.WithError(err).Error("cannot forward build update - dropping listener")
-			return status.Errorf(codes.Unknown, "cannot send update: %v", err)
+			log.WithError(err).Info("cannot forward build update - dropping listener")
+			return handleFailedBuildStreamResponse(err, "cannot send update")
 		}
 
 		if update.Status == protocol.BuildStatus_done_failure || update.Status == protocol.BuildStatus_done_success {
 			// build is done
 			o.clearListener(buildID)
 			o.metrics.BuildDone(update.Status == protocol.BuildStatus_done_success)
+			if update.Status != protocol.BuildStatus_done_success {
+				log.WithField("UserID", req.GetTriggeredBy()).Error("image build done failed for user")
+			}
 			break
 		}
 	}
@@ -512,8 +565,8 @@ func (o *Orchestrator) Logs(req *protocol.LogsRequest, resp protocol.ImageBuilde
 
 		err := resp.Send(update)
 		if err != nil {
-			log.WithError(err).Error("cannot forward log output - dropping listener")
-			return status.Errorf(codes.Unknown, "cannot send log output: %v", err)
+			log.WithError(err).Info("cannot forward log output - dropping listener")
+			return handleFailedBuildStreamResponse(err, "cannot send log output")
 		}
 	}
 
@@ -538,12 +591,12 @@ func (o *Orchestrator) ListBuilds(ctx context.Context, req *protocol.ListBuildsR
 	return &protocol.ListBuildsResponse{Builds: res}, nil
 }
 
-func (o *Orchestrator) checkImageExists(ctx context.Context, ref string, authentication *auth.Authentication) (exists bool, err error) {
+func (o *Orchestrator) checkImageExists(ctx context.Context, ref string, authentication *auth.Authentication, useRetryClient bool) (exists bool, err error) {
 	span, ctx := opentracing.StartSpanFromContext(ctx, "checkImageExists")
 	defer tracing.FinishSpan(span, &err)
 	span.SetTag("ref", ref)
 
-	_, err = o.RefResolver.Resolve(ctx, ref, resolve.WithAuthentication(authentication))
+	_, err = o.RefResolver.Resolve(ctx, ref, resolve.WithAuthentication(authentication), o.withRetryIfEnabled(useRetryClient))
 	if errors.Is(err, resolve.ErrNotFound) {
 		return false, nil
 	}
@@ -558,18 +611,32 @@ func (o *Orchestrator) checkImageExists(ctx context.Context, ref string, authent
 }
 
 // getAbsoluteImageRef returns the "digest" form of an image, i.e. contains no mutable image tags
-func (o *Orchestrator) getAbsoluteImageRef(ctx context.Context, ref string, allowedAuth auth.AllowedAuthFor) (res string, err error) {
-	auth, err := allowedAuth.GetAuthFor(o.Auth, ref)
+func (o *Orchestrator) getAbsoluteImageRef(ctx context.Context, ref string, allowedAuth auth.AllowedAuthFor, useRetryClient bool) (res string, err error) {
+	span, ctx := opentracing.StartSpanFromContext(ctx, "getAbsoluteImageRefWithResolver")
+	defer tracing.FinishSpan(span, &err)
+	span.LogKV("ref", ref)
+	span.LogKV("useRetryClient", useRetryClient)
+
+	log.WithField("ref", ref).WithField("useRetryClient", useRetryClient).Debug("getAbsoluteImageRefWithResolver")
+	auth, err := allowedAuth.GetAuthFor(ctx, o.Auth, ref)
 	if err != nil {
 		return "", status.Errorf(codes.InvalidArgument, "cannt resolve base image ref: %v", err)
 	}
 
-	ref, err = o.RefResolver.Resolve(ctx, ref, resolve.WithAuthentication(auth))
-	if xerrors.Is(err, resolve.ErrNotFound) {
+	ref, err = o.RefResolver.Resolve(ctx, ref, resolve.WithAuthentication(auth), o.withRetryIfEnabled(useRetryClient))
+	if errors.Is(err, resolve.ErrNotFound) {
 		return "", status.Error(codes.NotFound, "cannot resolve image")
 	}
-	if xerrors.Is(err, resolve.ErrUnauthorized) {
+	if errors.Is(err, resolve.ErrUnauthorized) {
+		if auth == nil {
+			log.WithField("ref", ref).Warn("auth was nil")
+		} else if auth.Auth == "" && auth.Password == "" {
+			log.WithField("ref", ref).Warn("auth was empty")
+		}
 		return "", status.Error(codes.Unauthenticated, "cannot resolve image")
+	}
+	if resolve.TooManyRequestsMatcher(err) {
+		return "", status.Errorf(codes.Unavailable, "upstream registry responds with 'too many request': %v", err)
 	}
 	if err != nil {
 		return "", status.Errorf(codes.Internal, "cannot resolve image: %v", err)
@@ -577,13 +644,20 @@ func (o *Orchestrator) getAbsoluteImageRef(ctx context.Context, ref string, allo
 	return ref, nil
 }
 
-func (o *Orchestrator) getBaseImageRef(ctx context.Context, bs *protocol.BuildSource, allowedAuth auth.AllowedAuthFor) (res string, err error) {
+func (o *Orchestrator) withRetryIfEnabled(useRetryClient bool) resolve.DockerRefResolverOption {
+	if useRetryClient {
+		return resolve.WithHttpClient(o.retryResolveClient)
+	}
+	return resolve.WithHttpClient(nil)
+}
+
+func (o *Orchestrator) getBaseImageRef(ctx context.Context, bs *protocol.BuildSource, allowedAuth auth.AllowedAuthFor, useRetryClient bool) (res string, err error) {
 	span, ctx := opentracing.StartSpanFromContext(ctx, "getBaseImageRef")
 	defer tracing.FinishSpan(span, &err)
 
 	switch src := bs.From.(type) {
 	case *protocol.BuildSource_Ref:
-		return o.getAbsoluteImageRef(ctx, src.Ref.Ref, allowedAuth)
+		return o.getAbsoluteImageRef(ctx, src.Ref.Ref, allowedAuth, useRetryClient)
 
 	case *protocol.BuildSource_File:
 		manifest := map[string]string{
@@ -651,6 +725,33 @@ func (o *Orchestrator) getWorkspaceImageRef(ctx context.Context, baseref string)
 
 	dst := hash.Sum([]byte{})
 	return fmt.Sprintf("%s:%x", o.Config.WorkspaceImageRepository, dst), nil
+}
+
+func handleFailedBuildStreamResponse(err error, msg string) error {
+	if err == nil {
+		// OK is OK
+		return nil
+	}
+
+	// If the error is a context.DeadlineExceeded, we return nil (OK) as requested.
+	if errors.Is(err, context.DeadlineExceeded) {
+		// Return nil (OK) for DeadlineExceeded
+		return nil
+	}
+
+	// If it's already a gRPC status error, check for DeadlineExceeded
+	if st, ok := status.FromError(err); ok {
+		if st.Code() == codes.DeadlineExceeded {
+			// Return nil (OK) for DeadlineExceeded as requested
+			return nil
+		}
+
+		log.WithError(err).WithField("code", status.Code(err)).Error(fmt.Sprintf("unexpected error while sending build response: %s", msg))
+		return err
+	}
+
+	log.WithError(err).Error(fmt.Sprintf("unexpected error while sending build response: %s", msg))
+	return status.Errorf(codes.Unavailable, "%s: %v", msg, err)
 }
 
 // parentCantCancelContext is a bit of a hack. We have some operations which we want to keep alive even after clients
@@ -799,4 +900,22 @@ func (o *Orchestrator) PublishLog(buildID string, message string) {
 			o.mu.Unlock()
 		}
 	}
+}
+
+func NewRetryTimeoutClient() *http.Client {
+	retryClient := retryablehttp.NewClient()
+	retryClient.Backoff = retryablehttp.LinearJitterBackoff
+	retryClient.HTTPClient.Timeout = 15 * time.Second
+	retryClient.RetryMax = 3
+	retryClient.RetryWaitMin = 500 * time.Millisecond
+	retryClient.RetryWaitMax = 2 * time.Microsecond
+	retryClient.CheckRetry = retryablehttp.DefaultRetryPolicy
+	retryClient.Logger = log.WithField("retry", "true")
+
+	// Use a custom transport to handle retries and timeouts
+	retryClient.HTTPClient.Transport = &http.Transport{
+		DisableKeepAlives: true, // Disable keep-alives to ensure fresh connections
+	}
+
+	return retryClient.StandardClient()
 }

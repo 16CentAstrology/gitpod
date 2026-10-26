@@ -1,0 +1,64 @@
+name: "Preview environment garbage collection"
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: read  # This is required for actions/checkout
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */4 * * *"
+jobs:
+  stale:
+    name: "Find stale preview environments"
+    runs-on: ubuntu-latest
+    container:
+      image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:main-gha.34606
+      options: --user root
+    outputs:
+      names: ${{ steps.set-matrix.outputs.names }}
+      count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Environment
+        uses: ./.github/actions/setup-environment
+        with:
+          identity_provider: ${{ secrets.DEV_PREVIEW_PROVIDER }}
+          service_account: ${{ secrets.DEV_PREVIEW_SA }}
+          leeway_segment_key: ${{ secrets.LEEWAY_SEGMENT_KEY }}
+      - name: Compute matrix
+        id: set-matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          leeway run dev/preview/previewctl:install
+
+          previewctl list stale | jq --null-input --raw-input --compact-output '[inputs | select(length>0)]' > /tmp/stale-json
+          echo "names=$(cat /tmp/stale-json)" >> $GITHUB_OUTPUT
+          echo "count=$(jq '. | length' /tmp/stale-json)" >> $GITHUB_OUTPUT
+
+  delete:
+    name: "Delete preview environment"
+    needs: [stale]
+    runs-on: ubuntu-latest
+    container:
+      image: eu.gcr.io/gitpod-core-dev/dev/dev-environment:main-gha.34606
+      options: --user root
+    if: ${{ needs.stale.outputs.count > 0 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.stale.outputs.names) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin@v4
+      - name: Setup Environment
+        uses: ./.github/actions/setup-environment
+        with:
+          identity_provider: ${{ secrets.DEV_PREVIEW_PROVIDER }}
+          service_account: ${{ secrets.DEV_PREVIEW_SA }}
+          leeway_segment_key: ${{ secrets.LEEWAY_SEGMENT_KEY }}
+      - name: Delete preview environment ${{ matrix.name }}
+        uses: ./.github/actions/delete-preview
+        with:
+          name: ${{ matrix.name }}

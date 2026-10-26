@@ -8,7 +8,8 @@ import { EmailDomainFilterEntry } from "@gitpod/gitpod-protocol";
 
 export const EmailDomainFilterDB = Symbol("EmailDomainFilterDB");
 export interface EmailDomainFilterDB {
-    storeFilterEntry(entry: EmailDomainFilterEntry): Promise<void>;
+    storeFilterEntry(entry: EmailDomainFilterEntry): Promise<EmailDomainFilterEntry>;
+    getFilterEntries(): Promise<EmailDomainFilterEntry[]>;
 
     /**
      * @param emailDomain

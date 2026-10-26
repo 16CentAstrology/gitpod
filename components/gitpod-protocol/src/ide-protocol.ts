@@ -12,6 +12,11 @@ export interface IDEServer {
      * Returns the IDE preferences.
      */
     getIDEOptions(): Promise<IDEOptions>;
+
+    /**
+     * Returns the IDE versions.
+     */
+    getIDEVersions(ide: string): Promise<string[] | undefined>;
 }
 
 export interface IDEOptions {
@@ -35,6 +40,16 @@ export interface IDEOptions {
      */
     clients?: { [id: string]: IDEClient };
 }
+
+export namespace IDEOptions {
+    export function asArray(options: IDEOptions): (IDEOption & { id: string })[] {
+        return Object.keys(options.options)
+            .map((id) => ({ ...options.options[id], id }))
+            .sort((a, b) => (a.orderKey || "").localeCompare(b.orderKey || ""));
+    }
+}
+
+export const IDESettingsVersion = "2.2";
 
 export interface IDEClient {
     /**
@@ -98,6 +113,11 @@ export interface IDEOption {
     hidden?: boolean;
 
     /**
+     * If `true` this IDE option is conditionally shown in the IDE preferences
+     */
+    experimental?: boolean;
+
+    /**
      * The image ref to the IDE image.
      */
     image: string;
@@ -136,4 +156,9 @@ export interface IDEOption {
      * LatestImageVersion the semantic version of the latest IDE image.
      */
     latestImageVersion?: string;
+
+    /**
+     * Wether is possible to pin a specific IDE version.
+     */
+    pinnable?: boolean;
 }

@@ -9,15 +9,23 @@ import { filePathTelepresenceAware } from "./env";
 import { DeepPartial } from "./util/deep-partial";
 import { PermissionName } from "./permission";
 
+const workspaceRegions = ["europe", "north-america", "south-america", "africa", "asia", ""] as const;
+export type WorkspaceRegion = typeof workspaceRegions[number];
+
+export function isWorkspaceRegion(s: string): s is WorkspaceRegion {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+    return workspaceRegions.indexOf(s as any) !== -1;
+}
+
 export interface WorkspaceCluster {
     // Name of the workspace cluster.
     // This is the string set in each
     // Must be identical to the installationShortname of the cluster it represents!
     name: string;
 
-    // The name of the application cluster to which this cluster should be registered.
+    // The name of the region this cluster belongs to. E.g. europe or north-america
     // The name can be at most 60 characters.
-    applicationCluster: string;
+    region: WorkspaceRegion;
 
     // URL of the cluster's ws-manager API
     url: string;
@@ -39,6 +47,18 @@ export interface WorkspaceCluster {
 
     // An optional set of constraints that limit who can start workspaces on the cluster
     admissionConstraints?: AdmissionConstraint[];
+
+    // The classes of workspaces that can be started on this cluster
+    availableWorkspaceClasses?: WorkspaceClass[];
+
+    // The class of workspaces that should be started on this cluster by default
+    preferredWorkspaceClass?: string;
+}
+
+export namespace WorkspaceCluster {
+    export function preferredWorkspaceClass(cluster: WorkspaceCluster): WorkspaceClass | undefined {
+        return (cluster.availableWorkspaceClasses || []).find((c) => c.id === cluster.preferredWorkspaceClass);
+    }
 }
 
 export type WorkspaceClusterState = "available" | "cordoned" | "draining";
@@ -77,6 +97,20 @@ export namespace AdmissionConstraint {
     }
 }
 
+export interface WorkspaceClass {
+    // id is a unique identifier (within the cluster) of this workspace class
+    id: string;
+
+    // The string we display to users in the UI
+    displayName: string;
+
+    // The description of this workspace class
+    description: string;
+
+    // The cost of running a workspace of this class per minute expressed in credits
+    creditsPerMinute: number;
+}
+
 export const WorkspaceClusterDB = Symbol("WorkspaceClusterDB");
 export interface WorkspaceClusterDB {
     /**
@@ -90,13 +124,13 @@ export interface WorkspaceClusterDB {
      * Deletes the cluster identified by this name, if any.
      * @param name
      */
-    deleteByName(name: string, applicationCluster: string): Promise<void>;
+    deleteByName(name: string): Promise<void>;
 
     /**
      * Finds a WorkspaceCluster with the given name. If there is none, `undefined` is returned.
      * @param name
      */
-    findByName(name: string, applicationCluster: string): Promise<WorkspaceCluster | undefined>;
+    findByName(name: string): Promise<WorkspaceCluster | undefined>;
 
     /**
      * Lists all WorkspaceClusterWoTls for which the given predicate is true (does not return TLS for size/speed concerns)
@@ -105,6 +139,7 @@ export interface WorkspaceClusterDB {
     findFiltered(predicate: WorkspaceClusterFilter): Promise<WorkspaceClusterWoTLS[]>;
 }
 
-export type WorkspaceClusterFilter = Pick<WorkspaceCluster, "applicationCluster"> &
-    DeepPartial<Pick<WorkspaceCluster, "name" | "state" | "govern" | "url">> &
+export type WorkspaceClusterFilter = DeepPartial<
+    Pick<WorkspaceCluster, "name" | "state" | "govern" | "url" | "region">
+> &
     Partial<{ minScore: number }>;

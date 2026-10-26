@@ -10,11 +10,17 @@ option go_package = "github.com/gitpod-io/gitpod/ide-service/api";
 option java_package = "io.gitpod.ideservice.api";
 
 service IDEService {
-    rpc GetConfig(GetConfigRequest) returns (GetConfigResponse) {}
-    rpc ResolveWorkspaceConfig(ResolveWorkspaceConfigRequest) returns (ResolveWorkspaceConfigResponse) {}
+    rpc GetConfig(GetConfigRequest) returns (GetConfigResponse) {
+        option idempotency_level = IDEMPOTENT;
+    }
+    rpc ResolveWorkspaceConfig(ResolveWorkspaceConfigRequest) returns (ResolveWorkspaceConfigResponse) {
+        option idempotency_level = IDEMPOTENT;
+    }
 }
 
-message GetConfigRequest {}
+message GetConfigRequest {
+    User user = 1;
+}
 
 message GetConfigResponse {
     string content = 1;
@@ -32,12 +38,17 @@ enum WorkspaceType {
     PREBUILD = 1;
 }
 
+message User {
+    string id = 1;
+    optional string email = 2;
+}
 
 message ResolveWorkspaceConfigRequest {
     WorkspaceType type = 1;
     string context = 2;
     string ide_settings = 3;
     string workspace_config = 4;
+    User user = 5;
 }
 
 message ResolveWorkspaceConfigResponse {
@@ -48,4 +59,5 @@ message ResolveWorkspaceConfigResponse {
     // control whether to configure default IDE for a user
     string referer_ide = 5;
     string tasks = 6;
+    string ide_settings = 7;
 }

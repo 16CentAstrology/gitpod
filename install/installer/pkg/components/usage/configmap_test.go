@@ -41,13 +41,18 @@ func TestConfigMap_ContainsSchedule(t *testing.T) {
 		  "usd": ""
 		}
 	   },
+	   "serverAddress": "server.test-namespace.svc.cluster.local:9877",
+	   "redis": {
+		 "address": "redis.test-namespace.svc.cluster.local:6379"
+	   },
        "server": {
          "services": {
            "grpc": {
              "address": "0.0.0.0:9001"
            }
          }
-       }
+       },
+	   "gitpodHost": "https://test.domain.everything.awesome.is"
      }`,
 		cfgmap.Data[configJSONFilename],
 	)

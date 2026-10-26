@@ -9,11 +9,9 @@ package main
 
 import (
 	"archive/tar"
-	"bufio"
 	"compress/gzip"
 	"context"
 	"embed"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -25,7 +23,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gitpod-io/gitpod/common-go/cgroups"
+	"github.com/gitpod-io/gitpod/docker-up/dockerd"
 	"github.com/rootless-containers/rootlesskit/pkg/sigproxy"
 	sigproxysignal "github.com/rootless-containers/rootlesskit/pkg/sigproxy/signal"
 	"github.com/sirupsen/logrus"
@@ -46,6 +44,7 @@ var opts struct {
 	UserAccessibleSocket bool
 	Verbose              bool
 	DontWrapNetNS        bool
+	AutoLogin            bool
 }
 
 //go:embed docker.tgz
@@ -59,7 +58,8 @@ var aptUpdated = false
 const (
 	dockerSocketFN = "/var/run/docker.sock"
 	gitpodUserId   = 33333
-	containerIf    = "ceth0"
+	gitpodGroupId  = 33333
+	containerIf    = "eth0"
 )
 
 func main() {
@@ -74,6 +74,7 @@ func main() {
 	pflag.BoolVar(&opts.AutoInstall, "auto-install", true, "auto-install prerequisites (docker)")
 	pflag.BoolVar(&opts.UserAccessibleSocket, "user-accessible-socket", true, "chmod the Docker socket to make it user accessible")
 	pflag.BoolVar(&opts.DontWrapNetNS, "dont-wrap-netns", os.Getenv("WORKSPACEKIT_WRAP_NETNS") == "true", "wrap the Docker daemon in a network namespace")
+	pflag.BoolVar(&opts.AutoLogin, "auto-login", false, "use content of GITPOD_IMAGE_AUTH to automatically login with the docker daemon")
 	pflag.Parse()
 
 	logger := logrus.New()
@@ -104,18 +105,7 @@ func runWithinNetns() (err error) {
 
 	args := []string{
 		"--data-root=/workspace/.docker-root",
-	}
-
-	unified, err := cgroups.IsUnifiedCgroupSetup()
-	if err != nil {
-		return xerrors.Errorf("could not determine cgroup setup: %w", err)
-	}
-	if !unified {
-		// Enable rootless mode only in cgroup v1 because docker requires systemd when using it in cgroup v2
-		args = append(args,
-			"--experimental",
-			"--rootless",
-		)
+		"--cri-containerd",
 	}
 
 	if opts.Verbose {
@@ -130,7 +120,8 @@ func runWithinNetns() (err error) {
 		)
 	}
 
-	userArgs, err := userArgs()
+	userArgsValue, _ := os.LookupEnv(DaemonArgs)
+	userArgs, err := dockerd.ParseUserArgs(log, userArgsValue)
 	if err != nil {
 		return xerrors.Errorf("cannot add user supplied docker args: %w", err)
 	}
@@ -144,8 +135,14 @@ func runWithinNetns() (err error) {
 	args = append(args, fmt.Sprintf("--mtu=%v", netIface.Attrs().MTU))
 	// configure docker0 MTU (used as control plane, not related to containers)
 	args = append(args, fmt.Sprintf("--network-control-plane-mtu=%v", netIface.Attrs().MTU))
+	// propagate MTU to all newly created bridge networks (e.g. docker-compose project networks)
+	args = append(args, fmt.Sprintf("--default-network-opt=bridge=com.docker.network.driver.mtu=%v", netIface.Attrs().MTU))
+
+	// cmp. ENT-324: Required to run dockerd >= 26.1 in a Gitpod workspace
+	os.Setenv("DOCKER_ALLOW_IPV6_ON_IPV4_INTERFACE", "1")
 
 	if listenFDs > 0 {
+
 		os.Setenv("LISTEN_PID", strconv.Itoa(os.Getpid()))
 		args = append(args, "-H", "fd://")
 
@@ -197,98 +194,6 @@ func runWithinNetns() (err error) {
 	if err != nil {
 		return err
 	}
-	return nil
-}
-
-type ConvertUserArg func(arg, value string) ([]string, error)
-
-var allowedDockerArgs = map[string]ConvertUserArg{
-	"remap-user": convertRemapUser,
-}
-
-func userArgs() ([]string, error) {
-	userArgs, exists := os.LookupEnv(DaemonArgs)
-	args := []string{}
-	if !exists {
-		return args, nil
-	}
-
-	var providedDockerArgs map[string]string
-	if err := json.Unmarshal([]byte(userArgs), &providedDockerArgs); err != nil {
-		return nil, xerrors.Errorf("unable to deserialize docker args: %w", err)
-	}
-
-	for userArg, userValue := range providedDockerArgs {
-		converter, exists := allowedDockerArgs[userArg]
-		if !exists {
-			continue
-		}
-
-		if converter != nil {
-			cargs, err := converter(userArg, userValue)
-			if err != nil {
-				return nil, xerrors.Errorf("could not convert %v - %v: %w", userArg, userValue, err)
-			}
-			args = append(args, cargs...)
-
-		} else {
-			args = append(args, "--"+userArg, userValue)
-		}
-	}
-
-	return args, nil
-}
-
-func convertRemapUser(arg, value string) ([]string, error) {
-	id, err := strconv.Atoi(value)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, f := range []string{"/etc/subuid", "/etc/subgid"} {
-		err := adaptSubid(f, id)
-		if err != nil {
-			return nil, xerrors.Errorf("could not adapt subid files: %w", err)
-		}
-	}
-
-	return []string{"--userns-remap", "gitpod"}, nil
-}
-
-func adaptSubid(oldfile string, id int) error {
-	uid, err := os.Open(oldfile)
-	if err != nil {
-		return err
-	}
-
-	newfile, err := os.Create(oldfile + ".new")
-	if err != nil {
-		return err
-	}
-
-	mappingFmt := func(username string, id int, size int) string { return fmt.Sprintf("%s:%d:%d\n", username, id, size) }
-
-	if id != 0 {
-		newfile.WriteString(mappingFmt("gitpod", 1, id))
-		newfile.WriteString(mappingFmt("gitpod", gitpodUserId, 1))
-	} else {
-		newfile.WriteString(mappingFmt("gitpod", gitpodUserId, 1))
-		newfile.WriteString(mappingFmt("gitpod", 1, gitpodUserId-1))
-		newfile.WriteString(mappingFmt("gitpod", gitpodUserId+1, 32200)) // map rest of user ids in the user namespace
-	}
-
-	uidScanner := bufio.NewScanner(uid)
-	for uidScanner.Scan() {
-		l := uidScanner.Text()
-		if !strings.HasPrefix(l, "gitpod") {
-			newfile.WriteString(l + "\n")
-		}
-	}
-
-	if err = os.Rename(newfile.Name(), oldfile); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -361,7 +266,8 @@ func installDocker() error {
 		}
 
 		switch hdr.Typeflag {
-		case tar.TypeReg, tar.TypeRegA:
+
+		case tar.TypeReg, tar.TypeRegA: //lint:ignore SA1019 backwards compatibility
 			file, err := os.OpenFile(dstpath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 			if err != nil {
 				return xerrors.Errorf("unable to create file: %v", err)
@@ -488,12 +394,12 @@ func detectRuncVersion(output string) (major, minor int, err error) {
 
 		major, err = strconv.Atoi(n[0])
 		if err != nil {
-			return 0, 0, xerrors.Errorf("could not parse major %s: %w", n[0])
+			return 0, 0, xerrors.Errorf("could not parse major %s: %w", n[0], err)
 		}
 
 		minor, err = strconv.Atoi(n[1])
 		if err != nil {
-			return 0, 0, xerrors.Errorf("could not parse minor %s: %w", n[1])
+			return 0, 0, xerrors.Errorf("could not parse minor %s: %w", n[1], err)
 		}
 
 		return major, minor, nil

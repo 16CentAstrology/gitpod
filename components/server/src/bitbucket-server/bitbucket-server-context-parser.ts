@@ -13,6 +13,7 @@ import { AbstractContextParser, IContextParser, URLParts } from "../workspace/co
 import { URL } from "url";
 import { BitbucketServer, BitbucketServerApi } from "./bitbucket-server-api";
 import { BitbucketServerTokenHelper } from "./bitbucket-server-token-handler";
+import { handleBitbucketError } from "./utils";
 
 const DEFAULT_BRANCH = "master";
 
@@ -31,10 +32,46 @@ export class BitbucketServerContextParser extends AbstractContextParser implemen
                 contextUrl,
             );
 
-            if (searchParams.has("at")) {
-                const branchName = this.toSimpleBranchName(decodeURIComponent(searchParams.get("at")!));
-                more.ref = branchName;
-                more.refType = "branch";
+            const searchParamsRef = searchParams.get("at") ?? searchParams.get("until");
+            if (searchParamsRef) {
+                if (searchParamsRef.startsWith("refs/tags/")) {
+                    more.ref = this.toSimplifiedTagName(searchParamsRef);
+                    more.refType = "tag";
+                } else if (searchParamsRef.startsWith("refs/heads/")) {
+                    more.ref = this.toSimpleBranchName(searchParamsRef);
+                    more.refType = "branch";
+                } else {
+                    const branchCandidate = await this.api
+                        .getBranch(user, {
+                            repoKind,
+                            branchName: searchParamsRef,
+                            owner,
+                            repositorySlug: repoName,
+                        })
+                        .catch((error) => {
+                            if (error?.message?.startsWith("Could not find branch")) {
+                                return undefined;
+                            }
+
+                            throw error;
+                        });
+
+                    if (branchCandidate) {
+                        more.ref = branchCandidate.displayId;
+                        more.refType = "branch";
+                    } else {
+                        const tagCandidate = await this.api.getTagLatestCommit(user, {
+                            repoKind,
+                            tag: searchParamsRef,
+                            owner,
+                            repositorySlug: repoName,
+                        });
+                        if (tagCandidate) {
+                            more.ref = tagCandidate.displayId;
+                            more.refType = "tag";
+                        }
+                    }
+                }
             }
 
             if (moreSegments[0] === "pull-requests" && !!moreSegments[1]) {
@@ -51,8 +88,9 @@ export class BitbucketServerContextParser extends AbstractContextParser implemen
 
             return await this.handleNavigatorContext(ctx, user, repoKind, host, owner, repoName, more);
         } catch (e) {
-            span.addTags({ contextUrl }).log({ error: e });
-            log.error({ userId: user.id }, "Error parsing Bitbucket context", e);
+            const error = e instanceof Error ? handleBitbucketError(e) : e;
+            span.addTags({ contextUrl }).log({ error });
+            log.error({ userId: user.id }, "Error parsing Bitbucket context", error);
             throw e;
         } finally {
             span.finish();
@@ -65,6 +103,12 @@ export class BitbucketServerContextParser extends AbstractContextParser implemen
         return qualifiedBranchName?.replace("refs/heads/", "");
     }
 
+    // Example: For a given context URL https://HOST/projects/FOO/repos/repo123/browse?at=refs%2tags%2Ffoo
+    // we need to parse the simple tag name `foo`.
+    public toSimplifiedTagName(qualifiedTagName?: string) {
+        return qualifiedTagName?.replace("refs/tags/", "");
+    }
+
     public async parseURL(user: User, contextUrl: string): Promise<{ repoKind: "projects" | "users" } & URLParts> {
         const url = new URL(contextUrl);
         const pathname = url.pathname.replace(/^\//, "").replace(/\/$/, ""); // pathname without leading and trailing slash
@@ -72,14 +116,14 @@ export class BitbucketServerContextParser extends AbstractContextParser implemen
 
         const host = this.host; // as per contract, cf. `canHandle(user, contextURL)`
 
-        const lenghtOfRelativePath = host.split("/").length - 1; // e.g. "123.123.123.123/gitlab" => length of 1
-        if (lenghtOfRelativePath > 0) {
+        const lengthOfRelativePath = host.split("/").length - 1; // e.g. "123.123.123.123/gitlab" => length of 1
+        if (lengthOfRelativePath > 0) {
             // remove segments from the path to be consider further, which belong to the relative location of the host
             // cf. https://github.com/gitpod-io/gitpod/issues/2637
-            segments.splice(0, lenghtOfRelativePath);
+            segments.splice(0, lengthOfRelativePath);
         }
 
-        let firstSegment = segments[0];
+        const firstSegment = segments[0];
         let owner: string = segments[1];
         let repoKind: "users" | "projects";
         let repoName;
@@ -133,7 +177,7 @@ export class BitbucketServerContextParser extends AbstractContextParser implemen
     ): Promise<NavigatorContext> {
         const span = TraceContext.startSpan("BitbucketServerContextParser.handleNavigatorContext", ctx);
         try {
-            const repo = await this.api.getRepository(user, {
+            const repoPromise = this.api.getRepository(user, {
                 repoKind,
                 owner,
                 repositorySlug: repoName,
@@ -143,6 +187,7 @@ export class BitbucketServerContextParser extends AbstractContextParser implemen
                 owner,
                 repositorySlug: repoName,
             });
+            const repo = await repoPromise;
             const repository = this.toRepository(host, repo, repoKind, defaultBranch);
             span.log({ "request.finished": "" });
 
@@ -159,24 +204,61 @@ export class BitbucketServerContextParser extends AbstractContextParser implemen
             if (!more.revision) {
                 more.ref = more.ref || repository.defaultBranch;
             }
-            more.refType = more.refType || "branch";
-
+            more.refType = more.refType ?? "branch";
             if (!more.revision) {
-                const tipCommitOnDefaultBranch = await this.api.getCommits(user, {
-                    repoKind,
-                    owner,
-                    repositorySlug: repoName,
-                    query: { limit: 1 },
-                });
-                const commits = tipCommitOnDefaultBranch?.values || [];
-                if (commits.length === 0) {
+                switch (more.refType) {
+                    case "branch": {
+                        if (!more.ref) {
+                            break;
+                        }
+                        const info = await this.api.getBranchLatestCommit(user, {
+                            repoKind,
+                            owner,
+                            repositorySlug: repoName,
+                            branch: more.ref!,
+                        });
+                        if (info) {
+                            more.revision = info.latestCommit;
+                        }
+                        break;
+                    }
+                    case "tag": {
+                        if (!more.ref) {
+                            break;
+                        }
+                        const info = await this.api.getTagLatestCommit(user, {
+                            repoKind,
+                            owner,
+                            repositorySlug: repoName,
+                            tag: more.ref!,
+                        });
+                        if (info) {
+                            more.revision = info.latestCommit;
+                        }
+                        break;
+                    }
+                    case "revision":
+                    default: {
+                        const tipCommitOnDefaultBranch = await this.api.getCommits(user, {
+                            repoKind,
+                            owner,
+                            repositorySlug: repoName,
+                            query: { limit: 1 },
+                        });
+                        const commits = tipCommitOnDefaultBranch?.values || [];
+                        if (commits.length === 0) {
+                            break;
+                        } else {
+                            more.revision = commits[0].id;
+                            // more.refType = "revision";
+                        }
+                    }
+                }
+                if (!more.revision) {
                     // empty repo
                     more.ref = undefined;
                     more.revision = "";
                     more.refType = undefined;
-                } else {
-                    more.revision = commits[0].id;
-                    // more.refType = "revision";
                 }
             }
 
@@ -190,8 +272,9 @@ export class BitbucketServerContextParser extends AbstractContextParser implemen
                 repository,
             };
         } catch (e) {
-            span.log({ error: e });
-            log.error({ userId: user.id }, "Error parsing Bitbucket navigator request context", e);
+            const error = e instanceof Error ? handleBitbucketError(e) : e;
+            span.log({ error });
+            log.error({ userId: user.id }, "Error parsing Bitbucket navigator request context", error);
             throw e;
         } finally {
             span.finish();
@@ -205,7 +288,7 @@ export class BitbucketServerContextParser extends AbstractContextParser implemen
         defaultBranch: BitbucketServer.Branch,
     ): Repository {
         const owner = repo.project.owner ? repo.project.owner.slug : repo.project.key;
-        const name = repo.name;
+        const name = repo.slug;
         const cloneUrl = repo.links.clone.find((u) => u.name === "http")?.href!;
         const webUrl = repo.links?.self[0]?.href?.replace(/\/browse$/, "");
 
@@ -218,6 +301,7 @@ export class BitbucketServerContextParser extends AbstractContextParser implemen
             repoKind,
             private: !repo.public,
             defaultBranch: defaultBranch.displayId || DEFAULT_BRANCH,
+            displayName: repo.name,
         };
 
         return result;

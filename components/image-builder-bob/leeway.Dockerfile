@@ -2,10 +2,12 @@
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM moby/buildkit:v0.10.5
+FROM ghcr.io/gitpod-io/buildkit:v0.34.0-gitpod.1@sha256:dbe25ae89df951659bbb996465754eba57281de9a99bdf1e27216c89098eee55
 
 USER root
-RUN apk --no-cache add sudo bash \
+RUN apk upgrade --no-cache brotli-libs curl libcurl libssl3 libcrypto3 \
+    && apk upgrade --no-cache \
+    && apk --no-cache add sudo bash \
     && addgroup -g 33333 gitpod \
     && adduser -D -h /home/gitpod -s /bin/sh -u 33333 -G gitpod gitpod \
     && echo "gitpod ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/gitpod \

@@ -42,6 +42,9 @@ const (
 	// ServiceTypeLabel help differentiate between port service and IDE service
 	ServiceTypeLabel = "serviceType"
 
+	// WorkspaceManaged indicates which component is responsible for managing the workspace
+	WorkspaceManagedByLabel = "gitpod.io/managed-by"
+
 	// CPULimitAnnotation enforces a strict CPU limit on a workspace by virtue of ws-daemon
 	CPULimitAnnotation = "gitpod.io/cpuLimit"
 
@@ -75,6 +78,9 @@ const (
 
 	// workspacePressureStallInfo indicates if pressure stall information should be retrieved for the workspace
 	WorkspacePressureStallInfoAnnotation = "gitpod.io/psi"
+
+	// ImageNameAnnotation indicates the original format of the main image of the pod
+	ImageNameAnnotation = "gitpod.io/image_name"
 )
 
 // GetOWIFromObject finds the owner, workspace and instance information on a Kubernetes object using labels
@@ -144,4 +150,54 @@ func GetWorkspaceType(pod *corev1.Pod) string {
 		return ""
 	}
 	return val
+}
+
+// AddUniqueCondition adds a condition if it doesn't exist already
+func AddUniqueCondition(conds []metav1.Condition, cond metav1.Condition) []metav1.Condition {
+	if cond.Reason == "" {
+		cond.Reason = "Unknown"
+	}
+
+	for i, c := range conds {
+		if c.Type == cond.Type {
+			conds[i] = cond
+			return conds
+		}
+	}
+
+	return append(conds, cond)
+}
+
+// GetCondition returns a condition from a list. If not present, it returns nil.
+func GetCondition(conds []metav1.Condition, tpe string) *metav1.Condition {
+	for _, c := range conds {
+		if c.Type == tpe {
+			return &c
+		}
+	}
+	return nil
+}
+
+// ConditionPresentAndTrue returns whether a condition is present and its status set to True.
+func ConditionPresentAndTrue(cond []metav1.Condition, tpe string) bool {
+	for _, c := range cond {
+		if c.Type == tpe {
+			return c.Status == metav1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// ConditionWithStatusAndReason returns whether a condition is present, and with the given Reason.
+func ConditionWithStatusAndReason(cond []metav1.Condition, tpe string, status bool, reason string) bool {
+	st := metav1.ConditionFalse
+	if status {
+		st = metav1.ConditionTrue
+	}
+	for _, c := range cond {
+		if c.Type == tpe {
+			return c.Type == tpe && c.Status == st && c.Reason == reason
+		}
+	}
+	return false
 }

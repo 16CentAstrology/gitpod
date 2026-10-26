@@ -1,0 +1,22 @@
+{
+    "result": {
+        "id": "123",
+        "settings": {
+            "workspaceClasses": {
+                "regular": "huge"
+            },
+            "restrictedWorkspaceClasses": [
+                "huge",
+                "large"
+            ],
+            "prebuilds": {
+                "enable": true,
+                "prebuildInterval": 5,
+                "cloneSettings": {
+                    "fullClone": false
+                }
+            }
+        }
+    },
+    "err": ""
+}

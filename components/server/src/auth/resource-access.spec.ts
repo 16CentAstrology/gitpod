@@ -4,7 +4,7 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { suite, test } from "mocha-typescript";
+import { suite, test } from "@testdeck/mocha";
 import * as chai from "chai";
 const expect = chai.expect;
 import {
@@ -21,10 +21,15 @@ import {
     GuardedResourceKind,
     RepositoryResourceGuard,
     SharedWorkspaceAccessGuard,
-    GuardedCostCenter,
 } from "./resource-access";
 import { PrebuiltWorkspace, User, UserEnvVar, Workspace, WorkspaceType } from "@gitpod/gitpod-protocol/lib/protocol";
-import { Team, TeamMemberInfo, TeamMemberRole, WorkspaceInstance } from "@gitpod/gitpod-protocol";
+import {
+    OrgMemberInfo,
+    Organization,
+    TeamMemberInfo,
+    TeamMemberRole,
+    WorkspaceInstance,
+} from "@gitpod/gitpod-protocol";
 import { HostContextProvider } from "./host-context-provider";
 
 class MockedRepositoryResourceGuard extends RepositoryResourceGuard {
@@ -179,6 +184,7 @@ class TestResourceAccess {
                             userId: "foo",
                             memberSince: "2021-08-31",
                             role: "member",
+                            ownedByOrganization: false,
                         },
                     ],
                 },
@@ -199,6 +205,7 @@ class TestResourceAccess {
                             userId: "foo",
                             memberSince: "2021-08-31",
                             role: "member",
+                            ownedByOrganization: false,
                         },
                     ],
                 },
@@ -219,6 +226,7 @@ class TestResourceAccess {
                             userId: "foo",
                             memberSince: "2021-08-31",
                             role: "member",
+                            ownedByOrganization: false,
                         },
                     ],
                 },
@@ -234,114 +242,105 @@ class TestResourceAccess {
         }
     }
 
-    @test public async costCenterResourceGuard() {
-        const createUser = (): User => {
-            return {
-                id: "123",
-                name: "testuser",
-                creationDate: new Date(2000, 1, 1).toISOString(),
-                identities: [
-                    {
-                        authId: "123",
-                        authName: "testuser",
-                        authProviderId: "github.com",
-                    },
-                ],
-            };
+    @test public async organizationResourceGuard() {
+        const user: User = {
+            id: "123",
+            name: "testuser",
+            creationDate: new Date(2000, 1, 1).toISOString(),
+            identities: [
+                {
+                    authId: "123",
+                    authName: "testuser",
+                    authProviderId: "github.com",
+                },
+            ],
         };
+
+        const org: Organization = {
+            id: "org-123",
+            name: "test-org",
+            creationTime: new Date(2000, 1, 1).toISOString(),
+        };
+
+        const noMember: OrgMemberInfo[] = [
+            {
+                userId: "foo",
+                role: "member",
+                memberSince: new Date(2000, 1, 1).toISOString(),
+                ownedByOrganization: false,
+            },
+        ];
+
+        const member: OrgMemberInfo[] = [
+            {
+                userId: user.id,
+                role: "member",
+                memberSince: new Date(2000, 1, 1).toISOString(),
+                ownedByOrganization: false,
+            },
+        ];
+
+        const memberAndOwned: OrgMemberInfo[] = [
+            {
+                userId: user.id,
+                role: "member",
+                memberSince: new Date(2000, 1, 1).toISOString(),
+                ownedByOrganization: true,
+            },
+        ];
+
+        const owner: OrgMemberInfo[] = [
+            {
+                userId: user.id,
+                role: "owner",
+                memberSince: new Date(2000, 1, 1).toISOString(),
+                ownedByOrganization: false,
+            },
+        ];
+
+        const ownerAndOwned: OrgMemberInfo[] = [
+            {
+                userId: user.id,
+                role: "owner",
+                memberSince: new Date(2000, 1, 1).toISOString(),
+                ownedByOrganization: true,
+            },
+        ];
 
         const tests: {
             name: string;
-            isOwner?: boolean;
-            teamRole?: TeamMemberRole;
-            operation: ResourceAccessOp;
-            expectation: boolean;
+            members: OrgMemberInfo[];
+            permitted: ResourceAccessOp[];
         }[] = [
-            // member
+            // not even a member
             {
-                name: "member - get",
-                teamRole: "member",
-                operation: "get",
-                expectation: false,
+                name: "not a member",
+                members: noMember,
+                permitted: ["create"],
             },
             {
-                name: "member - update",
-                teamRole: "member",
-                operation: "update",
-                expectation: false,
+                name: "member",
+                members: member,
+                permitted: ["get", "create"],
             },
             {
-                name: "member - update",
-                teamRole: "member",
-                operation: "create",
-                expectation: false,
+                name: "member and owned",
+                members: memberAndOwned,
+                permitted: ["get"],
             },
             {
-                name: "member - delete",
-                teamRole: "member",
-                operation: "delete",
-                expectation: false,
-            },
-            // team owner
-            {
-                name: "team owner - get",
-                teamRole: "owner",
-                operation: "get",
-                expectation: true,
+                name: "owner",
+                members: owner,
+                permitted: ["get", "update", "create", "delete"],
             },
             {
-                name: "team owner - update",
-                teamRole: "owner",
-                operation: "update",
-                expectation: true,
-            },
-            {
-                name: "team owner - update",
-                teamRole: "owner",
-                operation: "create",
-                expectation: true,
-            },
-            {
-                name: "team owner - delete",
-                teamRole: "owner",
-                operation: "delete",
-                expectation: true,
-            },
-            // owner
-            {
-                name: "owner - get",
-                isOwner: true,
-                operation: "get",
-                expectation: true,
-            },
-            {
-                name: "owner - update",
-                isOwner: true,
-                operation: "update",
-                expectation: true,
-            },
-            {
-                name: "owner - update",
-                isOwner: true,
-                operation: "create",
-                expectation: true,
-            },
-            {
-                name: "owner - delete",
-                isOwner: true,
-                operation: "delete",
-                expectation: true,
+                name: "owner and owned",
+                members: ownerAndOwned,
+                permitted: ["get", "update"],
             },
         ];
 
         for (const t of tests) {
-            const user = createUser();
-            const team: Team = {
-                id: "team-123",
-                name: "test-team",
-                creationTime: user.creationDate,
-                slug: "test-team",
-            };
             const resourceGuard = new CompositeResourceAccessGuard([
                 new OwnerResourceGuard(user.id),
                 new TeamMemberResourceGuard(user.id),
@@ -349,27 +348,15 @@ class TestResourceAccess {
                 new MockedRepositoryResourceGuard(true),
             ]);
 
-            let owner: GuardedCostCenter["owner"] | undefined = undefined;
-            if (t.isOwner) {
-                owner = { kind: "user", userId: user.id };
-            } else if (!!t.teamRole) {
-                const teamMembers: TeamMemberInfo[] = [
-                    {
-                        userId: user.id,
-                        role: t.teamRole,
-                        memberSince: user.creationDate,
-                    },
-                ];
-                owner = { kind: "team", team, members: teamMembers };
+            for (const op of ["get", "update", "create", "delete"] as ResourceAccessOp[]) {
+                const expectation = t.permitted.includes(op);
+                const actual = await resourceGuard.canAccess({ kind: "team", subject: org, members: t.members }, op);
+
+                expect(actual).to.be.eq(
+                    expectation,
+                    `"${t.name}" expected canAccess(resource, "${op}") === ${expectation}, but was ${actual}`,
+                );
             }
-            if (!owner) {
-                throw new Error("Bad test data: expected isOwner OR teamRole to be configured!");
-            }
-            const actual = await resourceGuard.canAccess({ kind: "costCenter", owner }, "get");
-            expect(actual).to.be.eq(
-                t.expectation,
-                `"${t.name}" expected canAccess(resource, "${t.operation}") === ${t.expectation}, but was ${actual}`,
-            );
         }
     }
 
@@ -651,13 +638,6 @@ class TestResourceAccess {
                 expectation: false,
             },
             {
-                name: "explicit scope with exact same owner and repo",
-                guard: new WorkspaceEnvVarAccessGuard([getEnvVarResourceScope]),
-                guardEnvVar: { kind: "envVar", subject: { repositoryPattern: "foo/x" } as UserEnvVar },
-                operation: "get",
-                expectation: true,
-            },
-            {
                 name: "explicit scope with exact different owner and exact same repo",
                 guard: new WorkspaceEnvVarAccessGuard([getEnvVarResourceScope]),
                 guardEnvVar: { kind: "envVar", subject: { repositoryPattern: "bar/x" } as UserEnvVar },
@@ -701,12 +681,14 @@ class TestResourceAccess {
             };
         };
         const otherUserId = "456";
+        const organizationId = "org-123";
 
         const workspaceId = "ws-123";
         const createWorkspace = (ownerId: string, type: WorkspaceType): Workspace => {
             return {
                 id: workspaceId,
                 ownerId,
+                organizationId,
                 type,
                 config: {},
                 creationTime: new Date(2000, 1, 2).toISOString(),
@@ -724,6 +706,9 @@ class TestResourceAccess {
                 workspaceId,
                 creationTime: new Date(2000, 1, 2).toISOString(),
                 region: "local",
+                configuration: {
+                    ideImage: "gitpod/workspace-full:latest",
+                },
                 status: {
                     version: 1,
                     conditions: {},
@@ -1150,6 +1135,7 @@ class TestResourceAccess {
                     userId: user.id,
                     role: t.teamRole,
                     memberSince: user.creationDate,
+                    ownedByOrganization: false,
                 });
             }
 

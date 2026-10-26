@@ -7,6 +7,7 @@ package config
 import (
 	"time"
 
+	agentSmith "github.com/gitpod-io/gitpod/agent-smith/pkg/config"
 	"github.com/gitpod-io/gitpod/common-go/util"
 	"github.com/gitpod-io/gitpod/installer/pkg/config"
 	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
@@ -35,8 +36,11 @@ func (v version) Factory() interface{} {
 	}
 }
 
+var (
+	defaultRepositoryUrl = config.GitpodContainerRegistry
+)
+
 const (
-	defaultRepositoryUrl  = "eu.gcr.io/gitpod-core-dev/build"
 	defaultOpenVSXURL     = "https://open-vsx.org"
 	defaultMetadataRegion = "local"
 )
@@ -69,84 +73,38 @@ func (v version) Defaults(in interface{}) error {
 		corev1.ResourceCPU:    resource.MustParse("1000m"),
 		corev1.ResourceMemory: resource.MustParse("2Gi"),
 	}
-	cfg.Workspace.Runtime.FSShiftMethod = FSShiftFuseFS
-	cfg.Workspace.Runtime.ContainerDSocket = containerd.ContainerdSocketLocationDefault.String()
+	cfg.Workspace.Runtime.FSShiftMethod = FSShiftShiftFS
+	cfg.Workspace.Runtime.ContainerDSocketDir = containerd.ContainerdSocketLocationDefault.String()
 	cfg.Workspace.Runtime.ContainerDRuntimeDir = containerd.ContainerdLocationDefault.String()
 	cfg.Workspace.MaxLifetime = util.Duration(36 * time.Hour)
-	cfg.Workspace.PrebuildPVC.Size = resource.MustParse("30Gi")
-	cfg.Workspace.PrebuildPVC.StorageClass = ""
-	cfg.Workspace.PrebuildPVC.SnapshotClass = ""
-	cfg.Workspace.PVC.Size = resource.MustParse("30Gi")
-	cfg.Workspace.PVC.StorageClass = ""
-	cfg.Workspace.PVC.SnapshotClass = ""
 	cfg.OpenVSX.URL = defaultOpenVSXURL
 	cfg.DisableDefinitelyGP = true
 
 	return nil
 }
 
+// Looks for deprecated parameters
 func (v version) CheckDeprecated(rawCfg interface{}) (map[string]interface{}, []string) {
-	warnings := make(map[string]interface{}, 0)
+	warnings := make(map[string]interface{}, 0) // A warning is for when a deprecated field is used
 	conflicts := make([]string, 0)
-	cfg := rawCfg.(*Config)
+	cfg := rawCfg.(*Config) // A conflict is for when both the deprecated and current field is used
 
-	if cfg.Experimental != nil {
-		if cfg.Experimental.Common != nil && cfg.Experimental.Common.UsePodSecurityPolicies {
-			warnings["experimental.common.usePodSecurityPolicies"] = "true"
-		}
+	for key, field := range deprecatedFields {
+		// Check if the deprecated field is in use
+		inUse, val := parseDeprecatedSelector(cfg, field)
 
-		if cfg.Experimental.WebApp != nil {
-			// service type of proxy is now configurable from main config
-			if cfg.Experimental.WebApp.ProxyConfig != nil && cfg.Experimental.WebApp.ProxyConfig.ServiceType != nil {
-				warnings["experimental.webapp.proxy.serviceType"] = *cfg.Experimental.WebApp.ProxyConfig.ServiceType
+		if inUse {
+			// Deprecated field in use - print the value to the warnings
+			warnings[key] = val
 
-				if cfg.Components != nil && cfg.Components.Proxy != nil && cfg.Components.Proxy.Service != nil && cfg.Components.Proxy.Service.ServiceType != nil {
-					conflicts = append(conflicts, "Cannot set proxy service type in both components and experimental")
-				} else {
-					// Promote the experimental value to the components
-					if cfg.Components == nil {
-						cfg.Components = &Components{}
-					}
-					if cfg.Components.Proxy == nil {
-						cfg.Components.Proxy = &ProxyComponent{}
-					}
-					if cfg.Components.Proxy.Service == nil {
-						cfg.Components.Proxy.Service = &ComponentTypeService{}
-					}
-					cfg.Components.Proxy.Service.ServiceType = cfg.Experimental.WebApp.ProxyConfig.ServiceType
-				}
-			}
-
-			// default workspace base image is now configurable from main config
-			if cfg.Experimental.WebApp.Server != nil {
-
-				workspaceImage := cfg.Experimental.WebApp.Server.WorkspaceDefaults.WorkspaceImage
-				if workspaceImage != "" {
-					warnings["experimental.webapp.server.workspaceDefaults.workspaceImage"] = workspaceImage
-
-					if cfg.Workspace.WorkspaceImage != "" {
-						conflicts = append(conflicts, "Cannot set default workspace image in both workspaces and experimental")
-					} else {
-						cfg.Workspace.WorkspaceImage = workspaceImage
-					}
-				}
-
-				registryAllowList := cfg.Experimental.WebApp.Server.DefaultBaseImageRegistryWhiteList
-				if registryAllowList != nil {
-					warnings["experimental.webapp.server.defaultBaseImageRegistryWhitelist"] = registryAllowList
-
-					if len(cfg.ContainerRegistry.PrivateBaseImageAllowList) > 0 {
-						conflicts = append(conflicts, "Cannot set allow list for private base image in both containerRegistry and experimental")
-					} else {
-						cfg.ContainerRegistry.PrivateBaseImageAllowList = registryAllowList
-					}
+			if field.MapValue != nil {
+				// There's a MapValue field
+				if err := field.MapValue(cfg); err != nil {
+					// There's a conflict on the mapped value - set in both old and new places
+					conflicts = append(conflicts, err.Error())
 				}
 			}
 		}
-	}
-
-	if cfg.ObjectStorage.MaximumBackupCount != nil {
-		warnings["objectStorage.maximumBackupCount"] = cfg.ObjectStorage.MaximumBackupCount
 	}
 
 	return warnings, conflicts
@@ -182,9 +140,10 @@ type Config struct {
 
 	AuthProviders []ObjectRef   `json:"authProviders" validate:"dive"`
 	BlockNewUsers BlockNewUsers `json:"blockNewUsers"`
-	License       *ObjectRef    `json:"license,omitempty"`
 
 	SSHGatewayHostKey *ObjectRef `json:"sshGatewayHostKey,omitempty"`
+
+	SSHGatewayCAKey *ObjectRef `json:"sshGatewayCAKey,omitempty"`
 
 	DisableDefinitelyGP bool `json:"disableDefinitelyGp"`
 
@@ -216,8 +175,9 @@ type Observability struct {
 }
 
 type Analytics struct {
-	SegmentKey string `json:"segmentKey"`
-	Writer     string `json:"writer"`
+	SegmentKey      string `json:"segmentKey"`
+	Writer          string `json:"writer"`
+	SegmentEndpoint string `json:"segmentEndpoint,omitempty"`
 }
 
 type Tracing struct {
@@ -232,6 +192,7 @@ type Database struct {
 	InCluster *bool             `json:"inCluster,omitempty"`
 	External  *DatabaseExternal `json:"external,omitempty"`
 	CloudSQL  *DatabaseCloudSQL `json:"cloudSQL,omitempty"`
+	SSL       *SSLOptions       `json:"ssl,omitempty"`
 }
 
 type DatabaseExternal struct {
@@ -243,11 +204,14 @@ type DatabaseCloudSQL struct {
 	Instance       string    `json:"instance" validate:"required"`
 }
 
+type SSLOptions struct {
+	CaCert *ObjectRef `json:"caCert,omitempty"`
+}
+
 type ObjectStorage struct {
 	InCluster    *bool                      `json:"inCluster,omitempty"`
 	S3           *ObjectStorageS3           `json:"s3,omitempty"`
 	CloudStorage *ObjectStorageCloudStorage `json:"cloudStorage,omitempty"`
-	Azure        *ObjectStorageAzure        `json:"azure,omitempty"`
 	// DEPRECATED
 	MaximumBackupCount *int       `json:"maximumBackupCount,omitempty"`
 	BlobQuota          *int64     `json:"blobQuota,omitempty"`
@@ -255,8 +219,8 @@ type ObjectStorage struct {
 }
 
 type ObjectStorageS3 struct {
-	Endpoint    string    `json:"endpoint" validate:"required"`
-	Credentials ObjectRef `json:"credentials" validate:"required"`
+	Endpoint    string     `json:"endpoint" validate:"required"`
+	Credentials *ObjectRef `json:"credentials"`
 
 	BucketName string `json:"bucket" validate:"required"`
 
@@ -266,10 +230,6 @@ type ObjectStorageS3 struct {
 type ObjectStorageCloudStorage struct {
 	ServiceAccount ObjectRef `json:"serviceAccount" validate:"required"`
 	Project        string    `json:"project" validate:"required"`
-}
-
-type ObjectStorageAzure struct {
-	Credentials ObjectRef `json:"credentials" validate:"required"`
 }
 
 type InstallationKind string
@@ -294,23 +254,30 @@ const (
 )
 
 type ContainerRegistry struct {
-	InCluster                 *bool                      `json:"inCluster,omitempty" validate:"required"`
-	External                  *ContainerRegistryExternal `json:"external,omitempty" validate:"required_if=InCluster false"`
-	S3Storage                 *S3Storage                 `json:"s3storage,omitempty"`
-	PrivateBaseImageAllowList []string                   `json:"privateBaseImageAllowList"`
+	InCluster *bool                      `json:"inCluster,omitempty" validate:"required"`
+	External  *ContainerRegistryExternal `json:"external,omitempty" validate:"required_if=InCluster false"`
+	S3Storage *S3Storage                 `json:"s3storage,omitempty"`
+
+	PrivateBaseImageAllowList []string `json:"privateBaseImageAllowList"`
+	EnableAdditionalECRAuth   bool     `json:"enableAdditionalECRAuth"`
+
+	SubassemblyBucket string `json:"subassemblyBucket"`
 }
 
 type ContainerRegistryExternal struct {
-	URL         string    `json:"url" validate:"required"`
-	Certificate ObjectRef `json:"certificate" validate:"required"`
+	URL         string     `json:"url" validate:"required"`
+	Certificate *ObjectRef `json:"certificate,omitempty"`
+	Credentials *ObjectRef `json:"credentials,omitempty"`
 }
 
 type S3Storage struct {
-	Bucket      string    `json:"bucket" validate:"required"`
-	Region      string    `json:"region" validate:"required"`
-	Endpoint    string    `json:"endpoint" validate:"required"`
-	Certificate ObjectRef `json:"certificate" validate:"required"`
+	Bucket      string     `json:"bucket" validate:"required"`
+	Region      string     `json:"region" validate:"required"`
+	Endpoint    string     `json:"endpoint" validate:"required"`
+	Certificate *ObjectRef `json:"certificate,omitempty"`
 }
+
+type ServiceAnnotations map[string]string
 
 type LogLevel string
 
@@ -337,7 +304,7 @@ type WorkspaceRuntime struct {
 	// The location of containerd socket on the host machine
 	ContainerDRuntimeDir string `json:"containerdRuntimeDir" validate:"required,startswith=/"`
 	// The location of containerd socket on the host machine
-	ContainerDSocket string `json:"containerdSocket" validate:"required,startswith=/"`
+	ContainerDSocketDir string `json:"containerdSocketDir" validate:"required,startswith=/"`
 }
 
 type WorkspaceResources struct {
@@ -365,27 +332,10 @@ type WorkspaceTemplates struct {
 	Regular    *corev1.Pod `json:"regular"`
 }
 
-type PersistentVolumeClaim struct {
-	// Size is a size of persistent volume claim to use
-	Size resource.Quantity `json:"size" validate:"required"`
-
-	// StorageClass is a storage class of persistent volume claim to use
-	StorageClass string `json:"storageClass"`
-
-	// SnapshotClass is a snapshot class name that is used to create volume snapshot
-	SnapshotClass string `json:"snapshotClass"`
-}
-
 type Workspace struct {
 	Runtime   WorkspaceRuntime    `json:"runtime" validate:"required"`
 	Resources Resources           `json:"resources" validate:"required"`
 	Templates *WorkspaceTemplates `json:"templates,omitempty"`
-
-	// PrebuildPVC is the struct that describes how to setup persistent volume claim for prebuild workspace
-	PrebuildPVC PersistentVolumeClaim `json:"prebuildPVC" validate:"required"`
-
-	// PVC is the struct that describes how to setup persistent volume claim for regular workspace
-	PVC PersistentVolumeClaim `json:"pvc" validate:"required"`
 
 	// MaxLifetime is the maximum time a workspace is allowed to run. After that, the workspace times out despite activity
 	MaxLifetime util.Duration `json:"maxLifetime" validate:"required"`
@@ -403,25 +353,22 @@ type Workspace struct {
 }
 
 type OpenVSX struct {
-	URL   string `json:"url" validate:"url"`
-	Proxy *Proxy `json:"proxy,omitempty"`
+	URL   string        `json:"url" validate:"url"`
+	Proxy *OpenVSXProxy `json:"proxy,omitempty"`
+}
+
+type OpenVSXProxy struct {
+	DisablePVC bool `json:"disablePVC"`
+	Proxy      `json:",inline"`
 }
 
 type Proxy struct {
-	DisablePVC bool `json:"disablePVC"`
+	ServiceAnnotations ServiceAnnotations `json:"serviceAnnotations"`
 }
-
-type LicensorType string
-
-const (
-	LicensorTypeGitpod     LicensorType = "gitpod"
-	LicensorTypeReplicated LicensorType = "replicated"
-)
 
 type FSShiftMethod string
 
 const (
-	FSShiftFuseFS  FSShiftMethod = "fuse"
 	FSShiftShiftFS FSShiftMethod = "shiftfs"
 )
 
@@ -458,7 +405,25 @@ type CustomizationSpec struct {
 }
 
 type Components struct {
-	Proxy *ProxyComponent `json:"proxy,omitempty"`
+	AgentSmith *agentSmith.Config    `json:"agentSmith,omitempty"`
+	IDE        *IDEComponents        `json:"ide"`
+	PodConfig  map[string]*PodConfig `json:"podConfig,omitempty"`
+	Proxy      *ProxyComponent       `json:"proxy,omitempty"`
+}
+
+type IDEComponents struct {
+	Metrics       *IDEMetrics `json:"metrics,omitempty"`
+	Proxy         *Proxy      `json:"proxy,omitempty"`
+	ResolveLatest *bool       `json:"resolveLatest,omitempty"`
+}
+
+type IDEMetrics struct {
+	ErrorReportingEnabled bool `json:"errorReportingEnabled,omitempty"`
+}
+
+type PodConfig struct {
+	Replicas  *int32                                  `json:"replicas,omitempty"`
+	Resources map[string]*corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 type ProxyComponent struct {

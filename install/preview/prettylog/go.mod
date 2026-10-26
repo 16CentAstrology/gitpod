@@ -1,6 +1,10 @@
 module github.com/gitpod-io/gitpod/install/preview/prettylog
 
-go 1.19
+go 1.24
+
+toolchain go1.24.13
+
+godebug tlsmlkem=0
 
 require (
 	github.com/gookit/color v1.5.0 // indirect

@@ -2,40 +2,34 @@
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM node:16.13.0-slim as builder
+FROM node:22.22.3-alpine AS builder
 
-RUN apt-get update && apt-get install -y build-essential python3
+# Install Python, make, gcc and g++ for node-gyp
+RUN apk update && \
+    apk add python3 make gcc g++ bash && \
+    rm -rf /var/cache/apk/*
 
 COPY components-server--app /installer/
 
 WORKDIR /app
 RUN /installer/install.sh
 
-FROM node:16.13.0-slim
+FROM node:22.22.3-alpine
+# npm is not used by the runtime entrypoint; omit its bundled dependency tree.
+RUN apk upgrade --no-cache libssl3 libcrypto3 \
+    && apk upgrade --no-cache \
+    && rm -rf /usr/local/lib/node_modules/npm \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx
 ENV NODE_OPTIONS="--unhandled-rejections=warn --max_old_space_size=2048"
-# Using ssh-keygen for RSA keypair generation
-RUN apt-get update && apt-get install -yq \
-        openssh-client \
-        procps \
-        net-tools \
-        nano \
-        curl \
-    && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/*
 
 EXPOSE 3000
 
-ENV PATH="/go/bin:${PATH}"
-
-# '--no-log-init': see https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#user
-RUN useradd --no-log-init --create-home --uid 31001 --home-dir /app/ unode
-COPY --from=builder /app /app/
-USER unode
+COPY --from=builder --chown=node:node /app /app/
 WORKDIR /app/node_modules/@gitpod/server
-# Don't use start-ee-inspect as long as we use native modules (casues segfault)
 
 ARG __GIT_COMMIT
 ARG VERSION
 
 ENV GITPOD_BUILD_GIT_COMMIT=${__GIT_COMMIT}
 ENV GITPOD_BUILD_VERSION=${VERSION}
-CMD exec yarn start-ee
+CMD ["./dist/main.js"]

@@ -7,6 +7,7 @@ package nsinsider
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,23 +102,19 @@ func Nsinsider(instanceID string, targetPid int, mod func(*exec.Cmd), opts ...ns
 	}
 
 	var cmdOut bytes.Buffer
+	var cmdErr bytes.Buffer
 	cmd.Stdout = &cmdOut
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = &cmdErr // gpl: Why to we write the stderr to os.StdErr? Not sure, so keeping the behavior here...
 	cmd.Stdin = os.Stdin
 	err = cmd.Run()
+	_, _ = io.Copy(os.Stderr, &cmdErr)
 	log.FromBuffer(&cmdOut, log.WithFields(log.OWI("", "", instanceID)))
 	if err != nil {
-		out, oErr := cmd.CombinedOutput()
-		if oErr != nil {
-			return fmt.Errorf("run nsinsider (%v) \n%v\n output error: %v",
-				cmd.Args,
-				err,
-				oErr,
-			)
-		}
-		return fmt.Errorf("run nsinsider (%v) failed: %q\n%v",
+		// writing stderr to the error so clients can pattern match on specific errors
+		return fmt.Errorf("run nsinsider (%v) failed: %q \\ %q\n%v",
 			cmd.Args,
-			string(out),
+			cmdOut.String(),
+			cmdErr.String(),
 			err,
 		)
 	}
