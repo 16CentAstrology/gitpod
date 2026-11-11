@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	ozzo "github.com/go-ozzo/ozzo-validation"
 	"github.com/go-ozzo/ozzo-validation/is"
@@ -26,7 +27,7 @@ import (
 )
 
 // DefaultWorkspaceClass is the name of the default workspace class
-const DefaultWorkspaceClass = "default"
+const DefaultWorkspaceClass = "g1-standard"
 
 type osFS struct{}
 
@@ -55,6 +56,11 @@ type ServiceConfiguration struct {
 	} `json:"rpcServer"`
 	ImageBuilderProxy struct {
 		TargetAddr string `json:"targetAddr"`
+		TLS        struct {
+			CA          string `json:"ca"`
+			Certificate string `json:"crt"`
+			PrivateKey  string `json:"key"`
+		} `json:"tls"`
 	} `json:"imageBuilderProxy"`
 
 	PProf struct {
@@ -63,12 +69,17 @@ type ServiceConfiguration struct {
 	Prometheus struct {
 		Addr string `json:"addr"`
 	} `json:"prometheus"`
+	Health struct {
+		Addr string `json:"addr"`
+	} `json:"health"`
 }
 
 // Configuration is the configuration of the ws-manager
 type Configuration struct {
 	// Namespace is the kubernetes namespace the workspace manager operates in
 	Namespace string `json:"namespace"`
+	// SecretsNamespace is the kubernetes namespace which contains workspace secrets
+	SecretsNamespace string `json:"secretsNamespace"`
 	// SchedulerName is the name of the workspace scheduler all pods are created with
 	SchedulerName string `json:"schedulerName"`
 	// SeccompProfile names the seccomp profile workspaces will use
@@ -78,9 +89,6 @@ type Configuration struct {
 	Timeouts WorkspaceTimeoutConfiguration `json:"timeouts"`
 	// InitProbe configures the ready-probe of workspaces which signal when the initialization is finished
 	InitProbe InitProbeConfiguration `json:"initProbe"`
-	// WorkspaceCACertSecret optionally names a secret which is mounted in `/etc/ssl/certs/gp-custom.crt`
-	// in all workspace pods.
-	WorkspaceCACertSecret string `json:"caCertSecret,omitempty"`
 	// WorkspaceURLTemplate is a Go template which resolves to the external URL of the
 	// workspace. Available fields are:
 	// - `ID` which is the workspace ID,
@@ -105,8 +113,8 @@ type Configuration struct {
 	EventTraceLog string `json:"eventTraceLog,omitempty"`
 	// ReconnectionInterval configures the time we wait until we reconnect to the various other services
 	ReconnectionInterval util.Duration `json:"reconnectionInterval"`
-	// DryRun prevents us from ever stopping a pod. It is considered equivalent to a listener mode
-	DryRun bool `json:"dryRun,omitempty"`
+	// MaintenanceMode prevents start workspace, stop workspace, and take snapshot operations
+	MaintenanceMode bool `json:"maintenanceMode,omitempty"`
 	// WorkspaceDaemon configures our connection to the workspace sync daemons runnin on the nodes
 	WorkspaceDaemon WorkspaceDaemonConfiguration `json:"wsdaemon"`
 	// RegistryFacadeHost is the host (possibly including port) on which the registry facade resolves
@@ -115,16 +123,40 @@ type Configuration struct {
 	WorkspaceClusterHost string `json:"workspaceClusterHost"`
 	// WorkspaceClasses provide different resource classes for workspaces
 	WorkspaceClasses map[string]*WorkspaceClass `json:"workspaceClass"`
+	// PreferredWorkspaceClass is the name of the workspace class that should be used by default
+	PreferredWorkspaceClass string `json:"preferredWorkspaceClass"`
 	// DebugWorkspacePod adds extra finalizer to workspace to prevent it from shutting down. Helps to debug.
 	DebugWorkspacePod bool `json:"debugWorkspacePod,omitempty"`
+	// WorkspaceMaxConcurrentReconciles configures the max amount of concurrent workspace reconciliations on
+	// the workspace controller.
+	WorkspaceMaxConcurrentReconciles int `json:"workspaceMaxConcurrentReconciles,omitempty"`
+	// TimeoutMaxConcurrentReconciles configures the max amount of concurrent workspace reconciliations on
+	// the timeout controller.
+	TimeoutMaxConcurrentReconciles int `json:"timeoutMaxConcurrentReconciles,omitempty"`
+	// EnableCustomSSLCertificate controls if we need to support custom SSL certificates for git operations
+	EnableCustomSSLCertificate bool `json:"enableCustomSSLCertificate"`
+	// WorkspacekitImage points to the default workspacekit image
+	WorkspacekitImage string `json:"workspacekitImage,omitempty"`
+
+	SSHGatewayCAPublicKeyFile string `json:"sshGatewayCAPublicKeyFile,omitempty"`
+
+	// SSHGatewayCAPublicKey is a CA public key
+	SSHGatewayCAPublicKey string
+
+	// PodRecreationMaxRetries
+	PodRecreationMaxRetries int `json:"podRecreationMaxRetries,omitempty"`
+	// PodRecreationBackoff
+	PodRecreationBackoff util.Duration `json:"podRecreationBackoff,omitempty"`
 }
 
 type WorkspaceClass struct {
 	Name        string                            `json:"name"`
+	Description string                            `json:"description"`
 	Container   ContainerConfiguration            `json:"container"`
 	Templates   WorkspacePodTemplateConfiguration `json:"templates"`
-	PrebuildPVC PVCConfiguration                  `json:"prebuildPVC"`
-	PVC         PVCConfiguration                  `json:"pvc"`
+
+	// CreditsPerMinute is the cost per minute for this workspace class in credits
+	CreditsPerMinute float32 `json:"creditsPerMinute"`
 }
 
 // WorkspaceTimeoutConfiguration configures the timeout behaviour of workspaces
@@ -222,7 +254,7 @@ func (c *Configuration) Validate() error {
 	}
 
 	if _, ok := c.WorkspaceClasses[DefaultWorkspaceClass]; !ok {
-		return xerrors.Errorf("missing \"%s\" workspace class", DefaultWorkspaceClass)
+		return xerrors.Errorf("missing default workspace class (\"%s\")", DefaultWorkspaceClass)
 	}
 	for name, class := range c.WorkspaceClasses {
 		if errs := validation.IsValidLabelValue(name); len(errs) > 0 {
@@ -273,22 +305,6 @@ var validWorkspaceURLTemplate = ozzo.By(func(o interface{}) error {
 
 	return err
 })
-
-// PVCConfiguration configures properties of persistent volume claim to use for workspace containers
-type PVCConfiguration struct {
-	Size          resource.Quantity `json:"size"`
-	StorageClass  string            `json:"storageClass"`
-	SnapshotClass string            `json:"snapshotClass"`
-}
-
-// Validate validates a PVC configuration
-func (c *PVCConfiguration) Validate() error {
-	return ozzo.ValidateStruct(c,
-		ozzo.Field(&c.Size, ozzo.Required),
-		ozzo.Field(&c.StorageClass, ozzo.Required),
-		ozzo.Field(&c.SnapshotClass, ozzo.Required),
-	)
-}
 
 // ContainerConfiguration configures properties of workspace pod container
 type ContainerConfiguration struct {
@@ -554,4 +570,8 @@ func (r *ResourceLimitConfiguration) StorageQuantity() (resource.Quantity, error
 type CpuResourceLimit struct {
 	MinLimit   string `json:"min"`
 	BurstLimit string `json:"burst"`
+}
+
+type MaintenanceConfig struct {
+	EnabledUntil *time.Time `json:"enabledUntil"`
 }

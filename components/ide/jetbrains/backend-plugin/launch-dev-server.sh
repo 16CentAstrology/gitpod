@@ -9,7 +9,7 @@ set -o pipefail
 # Default Options
 DEBUG_PORT=44444
 JB_QUALIFIER="latest"
-TEST_REPO=https://github.com/gitpod-io/spring-petclinic
+TEST_REPO=https://github.com/gitpod-samples/spring-petclinic
 RUN_FROM="release"
 
 # Parsing Custom Options
@@ -63,6 +63,7 @@ $GITPOD_PLUGIN_DIR/gradlew -PenvironmentName="$JB_QUALIFIER" buildPlugin
 # TODO(ak) actually should be gradle task to make use of output
 GITPOD_PLUGIN_DIST="$GITPOD_PLUGIN_DIR/build/distributions/gitpod-remote.zip"
 unzip $GITPOD_PLUGIN_DIST -d $TEST_PLUGINS_DIR
+rm -rf "$TEST_PLUGINS_DIR/plugin-classpath.txt"
 
 TEST_REPO_NAME=$(basename "$TEST_REPO")
 TEST_DIR=/workspace/$TEST_REPO_NAME

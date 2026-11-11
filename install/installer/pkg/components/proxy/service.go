@@ -70,6 +70,16 @@ func service(ctx *common.RenderContext) ([]runtime.Object, error) {
 			ContainerPort: baseserver.BuiltinMetricsPort,
 			ServicePort:   baseserver.BuiltinMetricsPort,
 		},
+		{
+			Name:          ContainerAnalyticsName,
+			ContainerPort: ContainerAnalyticsPort,
+			ServicePort:   ContainerAnalyticsPort,
+		},
+		{
+			Name:          ContainerConfigcatName,
+			ContainerPort: ContainerConfigcatPort,
+			ServicePort:   ContainerConfigcatPort,
+		},
 	}
 	if ctx.Config.SSHGatewayHostKey != nil {
 		ports = append(ports, common.ServicePort{

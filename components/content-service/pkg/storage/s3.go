@@ -1,6 +1,6 @@
 // Copyright (c) 2022 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package storage
 
@@ -21,6 +21,12 @@ import (
 	s3manager "github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+)
+
+const (
+	defaultCopyConcurrency = 10
+	defaultPartSize        = 50 // MiB
+	megabytes              = 1024 * 1024
 )
 
 var _ DirectAccess = &s3Storage{}
@@ -121,15 +127,22 @@ func (rs *PresignedS3Storage) DeleteObject(ctx context.Context, bucket string, q
 		return nil
 	}
 
-	_, err := rs.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+	resp, err := rs.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 		Bucket: &rs.Config.Bucket,
 		Delete: &types.Delete{
 			Objects: objects,
-			Quiet:   true,
+			Quiet:   aws.Bool(true),
 		},
 	})
 	if err != nil {
 		return err
+	}
+	if len(resp.Errors) > 0 {
+		var errs []string
+		for _, e := range resp.Errors {
+			errs = append(errs, fmt.Sprintf("%s: %s", aws.ToString(e.Key), aws.ToString(e.Message)))
+		}
+		return xerrors.Errorf("cannot delete objects: %s", strings.Join(errs, ", "))
 	}
 
 	return nil
@@ -146,7 +159,7 @@ func (rs *PresignedS3Storage) DiskUsage(ctx context.Context, bucket string, pref
 	}
 
 	for _, r := range resp.Contents {
-		size += int64(r.Size)
+		size += *r.Size
 	}
 	return
 }
@@ -228,7 +241,7 @@ func (rs *PresignedS3Storage) SignDownload(ctx context.Context, bucket string, o
 		Meta: ObjectMeta{
 			// TODO(cw): implement this if we need to support FWB with S3
 		},
-		Size: resp.ObjectSize,
+		Size: *resp.ObjectSize,
 		URL:  req.URL,
 	}, nil
 }
@@ -284,16 +297,32 @@ func (s3st *s3Storage) DownloadSnapshot(ctx context.Context, destination string,
 }
 
 func (s3st *s3Storage) download(ctx context.Context, destination string, obj string, mappings []archive.IDMapping) (found bool, err error) {
-	resp, err := s3st.client.GetObject(ctx, &s3.GetObjectInput{
+	downloader := s3manager.NewDownloader(s3st.client, func(d *s3manager.Downloader) {
+		d.Concurrency = defaultCopyConcurrency
+		d.PartSize = defaultPartSize * megabytes
+		d.BufferProvider = s3manager.NewPooledBufferedWriterReadFromProvider(25 * megabytes)
+	})
+
+	s3File, err := os.CreateTemp("", "temporal-s3-file")
+	if err != nil {
+		return true, xerrors.Errorf("creating temporal file: %s", err.Error())
+	}
+	defer os.Remove(s3File.Name())
+
+	_, err = downloader.Download(ctx, s3File, &s3.GetObjectInput{
 		Bucket: aws.String(s3st.Config.Bucket),
 		Key:    aws.String(obj),
 	})
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
 
-	err = archive.ExtractTarbal(ctx, resp.Body, destination, archive.WithUIDMapping(mappings), archive.WithGIDMapping(mappings))
+	_, err = s3File.Seek(0, 0)
+	if err != nil {
+		return false, err
+	}
+
+	err = archive.ExtractTarbal(ctx, s3File, destination, archive.WithUIDMapping(mappings), archive.WithGIDMapping(mappings))
 	if err != nil {
 		return true, xerrors.Errorf("tar %s: %s", destination, err.Error())
 	}
@@ -338,7 +367,7 @@ func (s3st *s3Storage) ListObjects(ctx context.Context, prefix string) ([]string
 		}
 
 		listParams.ContinuationToken = objs.NextContinuationToken
-		fetchObjects = objs.IsTruncated
+		fetchObjects = *objs.IsTruncated
 	}
 
 	return res, nil
@@ -389,7 +418,11 @@ func (s3st *s3Storage) Upload(ctx context.Context, source string, name string, o
 		err = xerrors.Errorf("Can only upload with actual S3 client")
 	}
 
-	uploader := s3manager.NewUploader(s3c)
+	uploader := s3manager.NewUploader(s3c, func(u *s3manager.Uploader) {
+		u.Concurrency = defaultCopyConcurrency
+		u.PartSize = defaultPartSize * megabytes
+		u.BufferProvider = s3manager.NewBufferedReadSeekerWriteToPool(25 * megabytes)
+	})
 	_, err = uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(obj),

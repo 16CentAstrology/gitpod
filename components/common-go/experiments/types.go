@@ -30,29 +30,69 @@ type Attributes struct {
 
 	// this is vscode header `x-market-client-id`
 	VSCodeClientID string
+
+	GitpodHost string
+
+	// Component is using in components/service-waiter
+	// Feature Flag key is `service_waiter_skip_component`
+	Component string
+}
+
+type ClientOpt func(o *options)
+
+func WithGitpodProxy(gitpodHost string) ClientOpt {
+	return func(o *options) {
+		o.sdkKey = "gitpod"
+		o.baseURL = fmt.Sprintf("https://%s/configcat", gitpodHost)
+		o.pollInterval = 1 * time.Minute
+	}
+}
+
+func WithPollInterval(interval time.Duration) ClientOpt {
+	return func(o *options) {
+		o.pollInterval = interval
+	}
+}
+
+func WithDefaultClient(defaultClient Client) ClientOpt {
+	return func(o *options) {
+		o.defaultClient = defaultClient
+		o.hasDefaultClient = true
+	}
+}
+
+type options struct {
+	pollInterval     time.Duration
+	baseURL          string
+	sdkKey           string
+	defaultClient    Client
+	hasDefaultClient bool
 }
 
 // NewClient constructs a new experiments.Client. This is NOT A SINGLETON.
 // You should normally only call this once in the lifecycle of an application, clients are independent of each other will refresh flags on their own.
-// If the environment contains CONFIGCAT_SDK_KEY value, it vill be used to construct a ConfigCat client.
+// If the environment contains CONFIGCAT_SDK_KEY value, it will be used to construct a ConfigCat client.
 // Otherwise, it returns a client which always returns the default value. This client is used for Self-Hosted installations.
-func NewClient() Client {
-	gitpodHost := os.Getenv("GITPOD_HOST")
-	if gitpodHost != "" {
-		return newConfigCatClient(configcat.Config{
-			SDKKey:       "gitpod",
-			BaseURL:      fmt.Sprintf("%s%s", gitpodHost, "/configcat"),
-			PollInterval: 1 * time.Minute,
-			HTTPTimeout:  3 * time.Second,
-		})
+func NewClient(opts ...ClientOpt) Client {
+	opt := &options{
+		sdkKey:       os.Getenv("CONFIGCAT_SDK_KEY"),
+		baseURL:      os.Getenv("CONFIGCAT_BASE_URL"),
+		pollInterval: 3 * time.Minute,
 	}
-	sdkKey := os.Getenv("CONFIGCAT_SDK_KEY")
-	if sdkKey == "" {
+	for _, o := range opts {
+		o(opt)
+	}
+
+	if opt.sdkKey == "" {
+		if opt.hasDefaultClient {
+			return opt.defaultClient
+		}
 		return NewAlwaysReturningDefaultValueClient()
 	}
 	return newConfigCatClient(configcat.Config{
-		SDKKey:       sdkKey,
-		PollInterval: 3 * time.Minute,
+		SDKKey:       opt.sdkKey,
+		BaseURL:      opt.baseURL,
+		PollInterval: opt.pollInterval,
 		HTTPTimeout:  3 * time.Second,
 		Logger:       &configCatLogger{log.Log},
 	})

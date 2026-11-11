@@ -6,6 +6,7 @@ package db_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,28 @@ func TestCostCenter_WriteRead(t *testing.T) {
 	require.Equal(t, costCenter.SpendingLimit, read.SpendingLimit)
 }
 
+func TestCostCenterManager_GetOrCreateCostCenter_concurrent(t *testing.T) {
+	conn := dbtest.ConnectForTests(t)
+	mnr := db.NewCostCenterManager(conn, db.DefaultSpendingLimit{
+		ForTeams: 0,
+		ForUsers: 500,
+	})
+	id := db.NewTeamAttributionID(uuid.New().String())
+	cleanUp(t, conn, id)
+
+	waitgroup := &sync.WaitGroup{}
+	save := func() {
+		_, err := mnr.GetOrCreateCostCenter(context.Background(), id)
+		require.NoError(t, err)
+		waitgroup.Done()
+	}
+	waitgroup.Add(10)
+	for i := 0; i < 10; i++ {
+		go save()
+	}
+	waitgroup.Wait()
+}
+
 func TestCostCenterManager_GetOrCreateCostCenter(t *testing.T) {
 	conn := dbtest.ConnectForTests(t)
 	mnr := db.NewCostCenterManager(conn, db.DefaultSpendingLimit{
@@ -45,18 +68,14 @@ func TestCostCenterManager_GetOrCreateCostCenter(t *testing.T) {
 		ForUsers: 500,
 	})
 	team := db.NewTeamAttributionID(uuid.New().String())
-	user := db.NewUserAttributionID(uuid.New().String())
-	cleanUp(t, conn, team, user)
+	cleanUp(t, conn, team)
 
 	teamCC, err := mnr.GetOrCreateCostCenter(context.Background(), team)
 	require.NoError(t, err)
-	userCC, err := mnr.GetOrCreateCostCenter(context.Background(), user)
-	require.NoError(t, err)
 	t.Cleanup(func() {
-		conn.Model(&db.CostCenter{}).Delete(teamCC, userCC)
+		conn.Model(&db.CostCenter{}).Delete(teamCC)
 	})
 	require.Equal(t, int32(0), teamCC.SpendingLimit)
-	require.Equal(t, int32(500), userCC.SpendingLimit)
 }
 
 func TestCostCenterManager_GetOrCreateCostCenter_ResetsExpired(t *testing.T) {
@@ -80,7 +99,7 @@ func TestCostCenterManager_GetOrCreateCostCenter_ResetsExpired(t *testing.T) {
 		BillingCycleStart: db.NewVarCharTime(now),
 	}
 	unexpiredCC := db.CostCenter{
-		ID:                db.NewUserAttributionID(uuid.New().String()),
+		ID:                db.NewTeamAttributionID(uuid.New().String()),
 		CreationTime:      db.NewVarCharTime(now),
 		SpendingLimit:     500,
 		BillingStrategy:   db.CostCenter_Other,
@@ -89,7 +108,7 @@ func TestCostCenterManager_GetOrCreateCostCenter_ResetsExpired(t *testing.T) {
 	}
 	// Stripe billing strategy should not be reset
 	stripeCC := db.CostCenter{
-		ID:                db.NewUserAttributionID(uuid.New().String()),
+		ID:                db.NewTeamAttributionID(uuid.New().String()),
 		CreationTime:      db.NewVarCharTime(now),
 		SpendingLimit:     0,
 		BillingStrategy:   db.CostCenter_Stripe,
@@ -141,99 +160,16 @@ func TestCostCenterManager_UpdateCostCenter(t *testing.T) {
 
 	t.Run("prevents updates to negative spending limit", func(t *testing.T) {
 		mnr := db.NewCostCenterManager(conn, limits)
-		userAttributionID := db.NewUserAttributionID(uuid.New().String())
-		teamAttributionID := db.NewTeamAttributionID(uuid.New().String())
-		cleanUp(t, conn, userAttributionID, teamAttributionID)
-
-		_, err := mnr.UpdateCostCenter(context.Background(), db.CostCenter{
-			ID:              userAttributionID,
-			BillingStrategy: db.CostCenter_Other,
-			SpendingLimit:   -1,
-		})
-		require.Error(t, err)
-		require.Equal(t, codes.InvalidArgument, status.Code(err))
-
-		_, err = mnr.UpdateCostCenter(context.Background(), db.CostCenter{
-			ID:              teamAttributionID,
-			BillingStrategy: db.CostCenter_Stripe,
-			SpendingLimit:   -1,
-		})
-		require.Error(t, err)
-		require.Equal(t, codes.InvalidArgument, status.Code(err))
-	})
-
-	t.Run("individual user on Other billing strategy can change spending limit of 500", func(t *testing.T) {
-		mnr := db.NewCostCenterManager(conn, limits)
-		userAttributionID := db.NewUserAttributionID(uuid.New().String())
-		cleanUp(t, conn, userAttributionID)
-
-		newCC, err := mnr.UpdateCostCenter(context.Background(), db.CostCenter{
-			ID:              userAttributionID,
-			BillingStrategy: db.CostCenter_Other,
-			SpendingLimit:   501,
-		})
-		require.NoError(t, err)
-		require.Equal(t, int32(501), newCC.SpendingLimit)
-
-	})
-
-	t.Run("individual user upgrading to stripe can set a limit of 1000 or more, but not less than 1000", func(t *testing.T) {
-		mnr := db.NewCostCenterManager(conn, limits)
-		userAttributionID := db.NewUserAttributionID(uuid.New().String())
-		cleanUp(t, conn, userAttributionID)
-
-		// Upgrading to Stripe requires spending limit
-		res, err := mnr.UpdateCostCenter(context.Background(), db.CostCenter{
-			ID:              userAttributionID,
-			BillingStrategy: db.CostCenter_Stripe,
-			SpendingLimit:   1000,
-		})
-		require.NoError(t, err)
-		requireCostCenterEqual(t, db.CostCenter{
-			ID:              userAttributionID,
-			SpendingLimit:   1000,
-			BillingStrategy: db.CostCenter_Stripe,
-		}, res)
-
-		// Try to lower the spending limit below configured limit
-		_, err = mnr.UpdateCostCenter(context.Background(), db.CostCenter{
-			ID:              userAttributionID,
-			BillingStrategy: db.CostCenter_Stripe,
-			SpendingLimit:   999,
-		})
-		require.Error(t, err, "lowering spending limit  below configured value is not allowed for user subscriptions")
-
-		// Try to update the cost center to higher usage limit
-		res, err = mnr.UpdateCostCenter(context.Background(), db.CostCenter{
-			ID:              userAttributionID,
-			BillingStrategy: db.CostCenter_Stripe,
-			SpendingLimit:   1001,
-		})
-		require.NoError(t, err)
-		requireCostCenterEqual(t, db.CostCenter{
-			ID:              userAttributionID,
-			SpendingLimit:   1001,
-			BillingStrategy: db.CostCenter_Stripe,
-		}, res)
-	})
-
-	t.Run("team on Other billing strategy get a spending limit of 0", func(t *testing.T) {
-		mnr := db.NewCostCenterManager(conn, limits)
 		teamAttributionID := db.NewTeamAttributionID(uuid.New().String())
 		cleanUp(t, conn, teamAttributionID)
 
-		// Allows udpating cost center as long as spending limit remains as configured
-		res, err := mnr.UpdateCostCenter(context.Background(), db.CostCenter{
+		_, err := mnr.UpdateCostCenter(context.Background(), db.CostCenter{
 			ID:              teamAttributionID,
-			BillingStrategy: db.CostCenter_Other,
-			SpendingLimit:   limits.ForTeams,
+			BillingStrategy: db.CostCenter_Stripe,
+			SpendingLimit:   -1,
 		})
-		require.NoError(t, err)
-		requireCostCenterEqual(t, db.CostCenter{
-			ID:              teamAttributionID,
-			SpendingLimit:   limits.ForTeams,
-			BillingStrategy: db.CostCenter_Other,
-		}, res)
+		require.Error(t, err)
+		require.Equal(t, codes.InvalidArgument, status.Code(err))
 	})
 
 	t.Run("team on Stripe billing strategy can set arbitrary positive spending limit", func(t *testing.T) {
@@ -261,6 +197,25 @@ func TestCostCenterManager_UpdateCostCenter(t *testing.T) {
 			SpendingLimit:   10,
 		})
 		require.NoError(t, err)
+	})
+
+	t.Run("increment billing cycle should always increment to now", func(t *testing.T) {
+		mnr := db.NewCostCenterManager(conn, limits)
+		teamAttributionID := db.NewTeamAttributionID(uuid.New().String())
+		cleanUp(t, conn, teamAttributionID)
+
+		res, err := mnr.GetOrCreateCostCenter(context.Background(), teamAttributionID)
+		require.NoError(t, err)
+
+		// set res.nextBillingTime to two months ago
+		res.NextBillingTime = db.NewVarCharTime(time.Now().AddDate(0, -2, 0))
+		conn.Save(res)
+
+		cc, err := mnr.IncrementBillingCycle(context.Background(), teamAttributionID)
+		require.NoError(t, err)
+
+		require.True(t, cc.NextBillingTime.Time().After(time.Now()), "The next billing time should be in the future")
+		require.True(t, cc.BillingCycleStart.Time().Before(time.Now()), "The next billing time should be in the future")
 	})
 }
 
@@ -409,7 +364,7 @@ func TestCostCenterManager_ResetUsage(t *testing.T) {
 			ForUsers: 500,
 		})
 		cc := dbtest.CreateCostCenters(t, conn, db.CostCenter{
-			ID:              db.NewUserAttributionID(uuid.New().String()),
+			ID:              db.NewTeamAttributionID(uuid.New().String()),
 			CreationTime:    db.NewVarCharTime(time.Now()),
 			SpendingLimit:   500,
 			BillingStrategy: db.CostCenter_Stripe,
@@ -442,4 +397,137 @@ func TestCostCenterManager_ResetUsage(t *testing.T) {
 
 	})
 
+	t.Run("transitioning from stripe back to other restores previous limit", func(t *testing.T) {
+		conn := dbtest.ConnectForTests(t)
+		mnr := db.NewCostCenterManager(conn, db.DefaultSpendingLimit{
+			ForTeams: 0,
+			ForUsers: 500,
+		})
+		var originalSpendingLimit int32 = 10
+		cc := dbtest.CreateCostCenters(t, conn, db.CostCenter{
+			ID:                db.NewTeamAttributionID(uuid.New().String()),
+			CreationTime:      db.NewVarCharTime(time.Now()),
+			SpendingLimit:     originalSpendingLimit,
+			BillingStrategy:   db.CostCenter_Other,
+			NextBillingTime:   db.NewVarCharTime(ts),
+			BillingCycleStart: db.NewVarCharTime(ts.AddDate(0, -1, 0)),
+		})[0]
+		cc.BillingStrategy = db.CostCenter_Stripe
+		_, err := mnr.UpdateCostCenter(context.Background(), cc)
+		require.NoError(t, err)
+		// change spending limit
+		cc.SpendingLimit = int32(20)
+		_, err = mnr.UpdateCostCenter(context.Background(), cc)
+		require.NoError(t, err)
+
+		cc, err = mnr.GetOrCreateCostCenter(context.Background(), cc.ID)
+		require.NoError(t, err)
+		require.Equal(t, int32(20), cc.SpendingLimit)
+
+		// change to other strategy again and verify the original limit is restored
+		cc.BillingStrategy = db.CostCenter_Other
+		cc, err = mnr.UpdateCostCenter(context.Background(), cc)
+		require.NoError(t, err)
+		require.Equal(t, originalSpendingLimit, cc.SpendingLimit)
+	})
+
+	t.Run("users get free credits only once for the first org", func(t *testing.T) {
+		conn := dbtest.ConnectForTests(t)
+		limitForUsers := int32(500)
+		limitForTeams := int32(0)
+		mnr := db.NewCostCenterManager(conn, db.DefaultSpendingLimit{
+			ForTeams: limitForTeams,
+			ForUsers: limitForUsers,
+		})
+		createMembership := func(t *testing.T, anOrgID string, aUserID string) {
+			memberShipID := uuid.New().String()
+			db := conn.Exec(`INSERT INTO d_b_team_membership (id, teamid, userid, role, creationtime) VALUES (?, ?, ?, ?, ?)`,
+				memberShipID,
+				anOrgID,
+				aUserID,
+				"owner",
+				db.TimeToISO8601(time.Now()))
+			require.NoError(t, db.Error)
+			t.Cleanup(func() {
+				conn.Exec(`DELETE FROM d_b_team_membership WHERE id = ?`, memberShipID)
+			})
+		}
+
+		createIdentity := func(t *testing.T, aUserID string, email string) {
+			identityID := uuid.New().String()
+			db := conn.Exec(`INSERT INTO d_b_identity (authProviderID, authId, authName, userid, primaryemail) VALUES (?, ?, ?, ?, ?)`,
+				"gitpod", identityID, "gitpod", aUserID, email)
+			require.NoError(t, db.Error)
+			t.Cleanup(func() {
+				conn.Exec(`DELETE FROM d_b_identity WHERE authId = ?`, identityID)
+			})
+		}
+
+		orgID := uuid.New().String()
+		orgID2 := uuid.New().String()
+		userID := uuid.New().String()
+		t.Cleanup(func() {
+			conn.Exec(`DELETE FROM d_b_free_credits WHERE userId = ?`, userID)
+		})
+		createIdentity(t, userID, "foo@gitpod.io")
+		createMembership(t, orgID, userID)
+		createMembership(t, orgID2, userID)
+		cc1, err := mnr.GetOrCreateCostCenter(context.Background(), db.NewTeamAttributionID(orgID))
+		require.NoError(t, err)
+		cc2, err := mnr.GetOrCreateCostCenter(context.Background(), db.NewTeamAttributionID(orgID2))
+		require.NoError(t, err)
+		require.Equal(t, limitForUsers, cc1.SpendingLimit)
+		require.Equal(t, limitForTeams, cc2.SpendingLimit)
+	})
+
+	t.Run("users with same email get free credits only once", func(t *testing.T) {
+		conn := dbtest.ConnectForTests(t)
+		limitForUsers := int32(500)
+		limitForTeams := int32(0)
+		mnr := db.NewCostCenterManager(conn, db.DefaultSpendingLimit{
+			ForTeams: limitForTeams,
+			ForUsers: limitForUsers,
+		})
+		createMembership := func(t *testing.T, anOrgID string, aUserID string) {
+			memberShipID := uuid.New().String()
+			db := conn.Exec(`INSERT INTO d_b_team_membership (id, teamid, userid, role, creationtime) VALUES (?, ?, ?, ?, ?)`,
+				memberShipID,
+				anOrgID,
+				aUserID,
+				"owner",
+				db.TimeToISO8601(time.Now()))
+			require.NoError(t, db.Error)
+			t.Cleanup(func() {
+				conn.Exec(`DELETE FROM d_b_team_membership WHERE id = ?`, memberShipID)
+			})
+		}
+
+		createIdentity := func(t *testing.T, aUserID string, email string) {
+			identityID := uuid.New().String()
+			db := conn.Exec(`INSERT INTO d_b_identity (authProviderID, authId, authName, userid, primaryemail) VALUES (?, ?, ?, ?, ?)`,
+				"gitpod", identityID, "gitpod", aUserID, email)
+			require.NoError(t, db.Error)
+			t.Cleanup(func() {
+				conn.Exec(`DELETE FROM d_b_identity WHERE authId = ?`, identityID)
+			})
+		}
+
+		orgID := uuid.New().String()
+		orgID2 := uuid.New().String()
+		userID := uuid.New().String()
+		userID2 := uuid.New().String()
+		t.Cleanup(func() {
+			conn.Exec(`DELETE FROM d_b_free_credits WHERE userId = ?`, userID)
+		})
+		createIdentity(t, userID, "foo@bar.de")
+		createIdentity(t, userID2, "foo@bar.de")
+		createMembership(t, orgID, userID)
+		createMembership(t, orgID2, userID2)
+		cc1, err := mnr.GetOrCreateCostCenter(context.Background(), db.NewTeamAttributionID(orgID))
+		require.NoError(t, err)
+		cc2, err := mnr.GetOrCreateCostCenter(context.Background(), db.NewTeamAttributionID(orgID2))
+		require.NoError(t, err)
+		require.Equal(t, limitForUsers, cc1.SpendingLimit)
+		require.Equal(t, limitForTeams, cc2.SpendingLimit)
+	})
 }

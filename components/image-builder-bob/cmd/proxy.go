@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/containerd/containerd/remotes/docker"
-	"github.com/docker/distribution/reference"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/distribution/reference"
 	"github.com/spf13/cobra"
 
 	log "github.com/gitpod-io/gitpod/common-go/log"
@@ -37,7 +37,7 @@ var proxyCmd = &cobra.Command{
 		}
 		authA, err := proxy.NewAuthorizerFromEnvVar(proxyOpts.AdditionalAuth)
 		if err != nil {
-			log.WithError(err).WithField("auth", proxyOpts.Auth).Fatal("cannot unmarshal auth")
+			log.WithError(err).WithField("additionalAuth", proxyOpts.AdditionalAuth).Fatal("cannot unmarshal additionalAuth")
 		}
 		authP = authP.AddIfNotExists(authA)
 
@@ -59,6 +59,7 @@ var proxyCmd = &cobra.Command{
 		}
 
 		auth := func() docker.Authorizer { return docker.NewDockerAuthorizer(docker.WithAuthCreds(authP.Authorize)) }
+		mirrorAuth := func() docker.Authorizer { return docker.NewDockerAuthorizer(docker.WithAuthCreds(authA.Authorize)) }
 		prx, err := proxy.NewProxy(&url.URL{Host: "localhost:8080", Scheme: "http"}, map[string]proxy.Repo{
 			"base": {
 				Host: reference.Domain(baseref),
@@ -72,7 +73,7 @@ var proxyCmd = &cobra.Command{
 				Tag:  targettag,
 				Auth: auth,
 			},
-		})
+		}, mirrorAuth)
 		if err != nil {
 			log.Fatal(err)
 		}

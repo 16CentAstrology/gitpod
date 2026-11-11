@@ -4,37 +4,40 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import * as express from "express";
-import * as passport from "passport";
-import { injectable, postConstruct, inject } from "inversify";
+import { BUILTIN_INSTLLATION_ADMIN_USER_ID, TeamDB } from "@gitpod/gitpod-db/lib";
 import { User } from "@gitpod/gitpod-protocol";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
-import { UserDB } from "@gitpod/gitpod-db/lib";
+import express from "express";
+import { inject, injectable, postConstruct } from "inversify";
+import passport from "passport";
 import { Config } from "../config";
-import { HostContextProvider } from "./host-context-provider";
-import { AuthProvider, AuthFlow } from "./auth-provider";
+import { reportLoginCompleted } from "../prometheus-metrics";
 import { TokenProvider } from "../user/token-provider";
-import { AuthProviderService } from "./auth-provider-service";
+import { UserAuthentication } from "../user/user-authentication";
 import { UserService } from "../user/user-service";
-import { increaseLoginCounter } from "../../src/prometheus-metrics";
+import { AuthFlow, AuthProvider } from "./auth-provider";
+import { HostContextProvider } from "./host-context-provider";
+import { SignInJWT } from "./jwt";
+import { NonceService } from "./nonce-service";
+import { validateLoginReturnToUrl, validateAuthorizeReturnToUrl, safeFragmentRedirect } from "../express-util";
 
 @injectable()
 export class Authenticator {
     protected passportInitialize: express.Handler;
-    protected passportSession: express.Handler;
 
     @inject(Config) protected readonly config: Config;
-    @inject(UserDB) protected userDb: UserDB;
+    @inject(UserService) protected userService: UserService;
+    @inject(TeamDB) protected teamDb: TeamDB;
     @inject(HostContextProvider) protected hostContextProvider: HostContextProvider;
     @inject(TokenProvider) protected readonly tokenProvider: TokenProvider;
-    @inject(AuthProviderService) protected readonly authProviderService: AuthProviderService;
-    @inject(UserService) protected readonly userService: UserService;
+    @inject(UserAuthentication) protected readonly userAuthentication: UserAuthentication;
+    @inject(SignInJWT) protected readonly signInJWT: SignInJWT;
+    @inject(NonceService) protected readonly nonceService: NonceService;
 
     @postConstruct()
     protected setup() {
         // Setup passport
         this.passportInitialize = passport.initialize();
-        this.passportSession = passport.session();
         passport.serializeUser<string>((user: User, done) => {
             if (user) {
                 done(null, user.id);
@@ -44,12 +47,9 @@ export class Authenticator {
         });
         passport.deserializeUser(async (id, done) => {
             try {
-                const user = await this.userDb.findUserById(id as string);
-                if (user) {
-                    done(null, user);
-                } else {
-                    done(new Error("User not found."));
-                }
+                const userId = id as string;
+                const user = await this.userService.findUserById(userId, userId);
+                done(null, user);
             } catch (err) {
                 done(err);
             }
@@ -59,7 +59,6 @@ export class Authenticator {
     get initHandlers(): express.Handler[] {
         return [
             this.passportInitialize, // adds `passport.user` to session
-            this.passportSession, // deserializes session user into  `req.user`
         ];
     }
 
@@ -70,18 +69,103 @@ export class Authenticator {
         });
     }
     protected async authCallbackHandler(req: express.Request, res: express.Response, next: express.NextFunction) {
-        if (req.url.startsWith("/auth/")) {
-            const hostContexts = this.hostContextProvider.getAll();
-            for (const { authProvider } of hostContexts) {
-                const authCallbackPath = authProvider.authCallbackPath;
-                if (req.url.startsWith(authCallbackPath)) {
-                    log.info(`Auth Provider Callback. Path: ${authCallbackPath}`);
-                    await authProvider.callback(req, res, next);
+        // Should match:
+        // * /auth/callback
+        // * /auth/<host_of_git_provider>/callback
+        if (req.path.startsWith("/auth/") && req.path.endsWith("/callback")) {
+            const stateParam = req.query.state;
+            try {
+                const flowState = await this.parseState(`${stateParam}`);
+                const host = flowState.host;
+                if (!host) {
+                    throw new Error("Auth flow state is missing 'host' attribute.");
+                }
+
+                // Handle GitHub OAuth edge case: redirect from api.* subdomain to base domain
+                // This allows nonce validation to work since cookies are accessible on base domain
+                if (this.isApiSubdomainOfConfiguredHost(req.hostname)) {
+                    log.info(`OAuth callback on api subdomain, redirecting to base domain for nonce validation`, {
+                        hostname: req.hostname,
+                        configuredHost: this.config.hostUrl.url.hostname,
+                    });
+                    const baseUrl = this.config.hostUrl.with({
+                        pathname: req.path,
+                        search: new URL(req.url, this.config.hostUrl.url).search,
+                    });
+                    safeFragmentRedirect(res, baseUrl.toString());
                     return;
                 }
+
+                // Always validate nonce for CSRF protection
+                const stateNonce = flowState.nonce;
+                const cookieNonce = this.nonceService.getNonceFromCookie(req);
+
+                if (!this.nonceService.validateNonce(stateNonce, cookieNonce)) {
+                    log.error(`CSRF protection: Nonce validation failed`, {
+                        url: req.url,
+                        hasStateNonce: !!stateNonce,
+                        hasCookieNonce: !!cookieNonce,
+                    });
+                    res.status(403).send("Authentication failed");
+                    return;
+                }
+
+                // Always clear the nonce cookie
+                this.nonceService.clearNonceCookie(res);
+
+                const hostContext = this.hostContextProvider.get(host);
+                if (!hostContext) {
+                    throw new Error("No host context found.");
+                }
+
+                // remember parsed state to be availble in the auth provider implementation
+                req.authFlow = flowState;
+
+                log.info(`Auth Provider Callback. Host: ${host}`);
+                await hostContext.authProvider.callback(req, res, next);
+            } catch (error) {
+                log.error(`Failed to handle callback.`, error, { url: req.url });
+                // Always clear nonce cookie on error
+                this.nonceService.clearNonceCookie(res);
             }
+        } else {
+            // Otherwise proceed with other handlers
+            return next();
         }
-        return next();
+    }
+
+    private async parseState(state: string): Promise<AuthFlow> {
+        // In preview environments, we prepend the current development branch to the state, to allow
+        // our preview proxy to route the Auth callback appropriately.
+        // See https://github.com/gitpod-io/ops/pull/9398/files
+        //
+        // We need to strip the branch out of the state, if it's present
+        if (state.indexOf(",") >= 0) {
+            const [, actualState] = state.split(",", 2);
+            state = actualState;
+        }
+
+        return await this.signInJWT.verify(state as string);
+    }
+
+    private deriveAuthState(state: string): string {
+        // In preview environments, we prepend the current development branch to the state, to allow
+        // our preview proxy to route the Auth callback appropriately.
+        // See https://github.com/gitpod-io/ops/pull/9398/files
+        if (this.config.devBranch) {
+            return `${this.config.devBranch},${state}`;
+        }
+
+        return state;
+    }
+
+    /**
+     * Checks if the current hostname is api.{configured-domain}.
+     * This handles the GitHub OAuth edge case where callbacks may come to api.* subdomain.
+     */
+    private isApiSubdomainOfConfiguredHost(hostname: string): boolean {
+        const configuredHost = this.config.hostUrl.url.hostname;
+        return hostname === `api.${configuredHost}`;
     }
 
     protected async getAuthProviderForHost(host: string): Promise<AuthProvider | undefined> {
@@ -91,70 +175,75 @@ export class Authenticator {
 
     async authenticate(req: express.Request, res: express.Response, next: express.NextFunction): Promise<void> {
         if (req.isAuthenticated()) {
-            log.info({ sessionId: req.sessionID }, `User is already authenticated. Continue.`, { "login-flow": true });
+            log.info(`User is already authenticated. Continue.`, { "login-flow": true });
             return next();
         }
-        let returnTo: string | undefined = req.query.returnTo?.toString();
-        if (returnTo) {
-            log.info({ sessionId: req.sessionID }, `Stored returnTo URL: ${returnTo}`, { "login-flow": true });
+        let returnToParam: string | undefined = req.query.returnTo?.toString();
+        if (returnToParam) {
+            log.info(`Stored returnTo URL: ${returnToParam}`, { "login-flow": true });
+            // Validate returnTo URL against allowlist for login API
+            if (!validateLoginReturnToUrl(returnToParam, this.config.hostUrl)) {
+                log.warn(`Invalid returnTo URL rejected for login: ${returnToParam}`, { "login-flow": true });
+                safeFragmentRedirect(res, this.getSorryUrl(`Invalid return URL.`));
+                return;
+            }
         }
         // returnTo defaults to workspaces url
         const workspaceUrl = this.config.hostUrl.asDashboard().toString();
-        returnTo = returnTo || workspaceUrl;
+        returnToParam = returnToParam || workspaceUrl;
+        const returnTo = returnToParam;
+
         const host: string = req.query.host?.toString() || "";
         const authProvider = host && (await this.getAuthProviderForHost(host));
         if (!host || !authProvider) {
-            log.info({ sessionId: req.sessionID }, `Bad request: missing parameters.`, { "login-flow": true });
-            res.redirect(this.getSorryUrl(`Bad request: missing parameters.`));
+            log.info(`Bad request: missing parameters.`, { "login-flow": true });
+            safeFragmentRedirect(res, this.getSorryUrl(`Bad request: missing parameters.`));
+            return;
+        }
+        // Logins with organizational Git Auth is not permitted
+        if (authProvider.info.organizationId) {
+            log.info(`Login with "${host}" is not permitted.`, {
+                "authorize-flow": true,
+                ap: authProvider.info,
+            });
+            safeFragmentRedirect(res, this.getSorryUrl(`Login with "${host}" is not permitted.`));
             return;
         }
         if (this.config.disableDynamicAuthProviderLogin && !authProvider.params.builtin) {
-            log.info({ sessionId: req.sessionID }, `Auth Provider is not allowed.`, { ap: authProvider.info });
-            res.redirect(this.getSorryUrl(`Login with ${authProvider.params.host} is not allowed.`));
-            return;
-        }
-        if (!req.session) {
-            // The session is missing entirely: count as client error
-            increaseLoginCounter("failed_client", authProvider.info.host);
-            log.info({}, `No session.`, { "login-flow": true });
-            res.redirect(this.getSorryUrl(`No session found. Please refresh the browser.`));
+            log.info(`Auth Provider is not allowed.`, { ap: authProvider.info });
+            safeFragmentRedirect(res, this.getSorryUrl(`Login with ${authProvider.params.host} is not allowed.`));
             return;
         }
 
-        if (!authProvider.info.verified && !(await this.isInSetupMode())) {
-            increaseLoginCounter("failed", authProvider.info.host);
-            log.info({ sessionId: req.sessionID }, `Login with "${host}" is not permitted.`, {
+        if (!authProvider.info.verified) {
+            reportLoginCompleted("failed_client", "git");
+            log.warn(`Login with "${host}" is not permitted as the provider has not been verified.`, {
                 "login-flow": true,
                 ap: authProvider.info,
             });
-            res.redirect(this.getSorryUrl(`Login with "${host}" is not permitted.`));
+            safeFragmentRedirect(res, this.getSorryUrl(`Login with "${host}" is not permitted.`));
             return;
         }
 
-        // prepare session
-        await AuthFlow.attach(req.session, {
+        // Always generate nonce for CSRF protection (validation controlled by feature flag)
+        const nonce = this.nonceService.generateNonce();
+        this.nonceService.setNonceCookie(res, nonce);
+
+        const state = await this.signInJWT.sign({
             host,
             returnTo,
+            nonce,
         });
+
         // authenticate user
-        authProvider.authorize(req, res, next);
-    }
-    protected async isInSetupMode() {
-        const hasAnyStaticProviders = this.hostContextProvider
-            .getAll()
-            .some((hc) => hc.authProvider.params.builtin === true);
-        if (hasAnyStaticProviders) {
-            return false;
-        }
-        const noUser = (await this.userDb.getUserCount()) === 0;
-        return noUser;
+        authProvider.authorize(req, res, next, this.deriveAuthState(state));
     }
 
     async deauthorize(req: express.Request, res: express.Response, next: express.NextFunction) {
         const user = req.user;
         if (!req.isAuthenticated() || !User.is(user)) {
-            log.info({ sessionId: req.sessionID }, `User is not authenticated.`);
-            res.redirect(this.getSorryUrl(`Not authenticated. Please login.`));
+            log.info(`User is not authenticated.`);
+            safeFragmentRedirect(res, this.getSorryUrl(`Not authenticated. Please login.`));
             return;
         }
         const returnTo: string = req.query.returnTo?.toString() || this.config.hostUrl.asDashboard().toString();
@@ -163,21 +252,22 @@ export class Authenticator {
         const authProvider = host && (await this.getAuthProviderForHost(host));
 
         if (!host || !authProvider) {
-            log.warn({ sessionId: req.sessionID }, `Bad request: missing parameters.`);
-            res.redirect(this.getSorryUrl(`Bad request: missing parameters.`));
+            log.warn(`Bad request: missing parameters.`);
+            safeFragmentRedirect(res, this.getSorryUrl(`Bad request: missing parameters.`));
             return;
         }
 
         try {
-            await this.userService.deauthorize(user, authProvider.authProviderId);
-            res.redirect(returnTo);
+            await this.userAuthentication.deauthorize(user, authProvider.authProviderId);
+            safeFragmentRedirect(res, returnTo);
         } catch (error) {
             next(error);
-            log.error({ sessionId: req.sessionID }, `Failed to disconnect a provider.`, error, {
+            log.error(`Failed to disconnect a provider.`, error, {
                 host,
                 userId: user.id,
             });
-            res.redirect(
+            safeFragmentRedirect(
+                res,
                 this.getSorryUrl(
                     `Failed to disconnect a provider: ${error && error.message ? error.message : "unknown reason"}`,
                 ),
@@ -186,39 +276,82 @@ export class Authenticator {
     }
 
     async authorize(req: express.Request, res: express.Response, next: express.NextFunction) {
-        if (!req.session) {
-            log.info({}, `No session.`, { "authorize-flow": true });
-            res.redirect(this.getSorryUrl(`No session found. Please refresh the browser.`));
-            return;
-        }
         const user = req.user;
         if (!req.isAuthenticated() || !User.is(user)) {
-            log.info({ sessionId: req.sessionID }, `User is not authenticated.`, { "authorize-flow": true });
-            res.redirect(this.getSorryUrl(`Not authenticated. Please login.`));
+            log.info(`User is not authenticated.`, { "authorize-flow": true });
+            safeFragmentRedirect(res, this.getSorryUrl(`Not authenticated. Please login.`));
             return;
         }
-        const returnTo: string | undefined = req.query.returnTo?.toString();
+        if (user.id === BUILTIN_INSTLLATION_ADMIN_USER_ID) {
+            log.info(`Authorization is not permitted for admin user.`);
+            safeFragmentRedirect(
+                res,
+                this.getSorryUrl(`Authorization is not permitted for admin user. Please login with a user account.`),
+            );
+            return;
+        }
+        const returnToParam: string | undefined = req.query.returnTo?.toString();
         const host: string | undefined = req.query.host?.toString();
         const scopes: string = req.query.scopes?.toString() || "";
         const override = req.query.override === "true";
         const authProvider = host && (await this.getAuthProviderForHost(host));
-        if (!returnTo || !host || !authProvider) {
-            log.info({ sessionId: req.sessionID }, `Bad request: missing parameters.`, { "authorize-flow": true });
-            res.redirect(this.getSorryUrl(`Bad request: missing parameters.`));
+
+        if (!returnToParam || !host || !authProvider) {
+            log.info(`Bad request: missing parameters.`, { "authorize-flow": true });
+            safeFragmentRedirect(res, this.getSorryUrl(`Bad request: missing parameters.`));
             return;
         }
 
-        if (!authProvider.info.verified && user.id !== authProvider.info.ownerId) {
-            log.info({ sessionId: req.sessionID }, `Authorization with "${host}" is not permitted.`, {
+        // Always validate returnTo URL against allowlist for authorize API
+        const isValidReturnTo = validateAuthorizeReturnToUrl(returnToParam, this.config.hostUrl);
+        if (!isValidReturnTo) {
+            log.warn(`Invalid returnTo URL rejected for authorize`, {
+                "authorize-flow": true,
+                returnToParam,
+            });
+            safeFragmentRedirect(res, this.getSorryUrl(`Invalid return URL.`));
+            return;
+        }
+
+        const returnTo = returnToParam;
+
+        // For non-verified org auth provider, ensure user is an owner of the org
+        if (!authProvider.info.verified && authProvider.info.organizationId) {
+            const member = await this.teamDb.findTeamMembership(user.id, authProvider.info.organizationId);
+            if (member?.role !== "owner") {
+                log.info(`Authorization with "${host}" is not permitted.`, {
+                    "authorize-flow": true,
+                    ap: authProvider.info,
+                });
+                safeFragmentRedirect(res, this.getSorryUrl(`Authorization with "${host}" is not permitted.`));
+                return;
+            }
+        }
+
+        // For non-verified, non-org auth provider, ensure user is the owner of the auth provider
+        if (!authProvider.info.verified && !authProvider.info.organizationId && user.id !== authProvider.info.ownerId) {
+            log.info(`Authorization with "${host}" is not permitted.`, {
                 "authorize-flow": true,
                 ap: authProvider.info,
             });
-            res.redirect(this.getSorryUrl(`Authorization with "${host}" is not permitted.`));
+            safeFragmentRedirect(res, this.getSorryUrl(`Authorization with "${host}" is not permitted.`));
             return;
         }
 
+        // Ensure user is a member of the org
+        if (authProvider.info.organizationId) {
+            const member = await this.teamDb.findTeamMembership(user.id, authProvider.info.organizationId);
+            if (!member) {
+                log.info(`Authorization with "${host}" is not permitted.`, {
+                    "authorize-flow": true,
+                    ap: authProvider.info,
+                });
+                safeFragmentRedirect(res, this.getSorryUrl(`Authorization with "${host}" is not permitted.`));
+                return;
+            }
+        }
+
         // prepare session
-        await AuthFlow.attach(req.session, { host, returnTo, overrideScopes: override });
         let wantedScopes = scopes
             .split(",")
             .map((s) => s.trim())
@@ -239,29 +372,34 @@ export class Authenticator {
             }
         }
         // authorize Gitpod
-        log.info(
-            { sessionId: req.sessionID },
-            `(doAuthorize) wanted scopes (${override ? "overriding" : "merging"}): ${wantedScopes.join(",")}`,
-        );
-        authProvider.authorize(req, res, next, wantedScopes);
+        log.info(`(doAuthorize) wanted scopes (${override ? "overriding" : "merging"}): ${wantedScopes.join(",")}`);
+
+        // Always generate nonce for CSRF protection (validation controlled by feature flag)
+        const nonce = this.nonceService.generateNonce();
+        this.nonceService.setNonceCookie(res, nonce);
+
+        const state = await this.signInJWT.sign({ host, returnTo, overrideScopes: override, nonce });
+        authProvider.authorize(req, res, next, this.deriveAuthState(state), wantedScopes);
     }
-    protected mergeScopes(a: string[], b: string[]) {
+    private mergeScopes(a: string[], b: string[]) {
         const set = new Set(a);
         b.forEach((s) => set.add(s));
         return Array.from(set).sort();
     }
-    protected async getCurrentScopes(user: any, authProvider: AuthProvider) {
+    private async getCurrentScopes(user: any, authProvider: AuthProvider) {
         if (User.is(user)) {
             try {
                 const token = await this.tokenProvider.getTokenForHost(user, authProvider.params.host);
-                return token.scopes;
+                if (token) {
+                    return token.scopes;
+                }
             } catch {
                 // no token
             }
         }
         return [];
     }
-    protected getSorryUrl(message: string) {
+    private getSorryUrl(message: string) {
         return this.config.hostUrl.asSorry(message).toString();
     }
 }

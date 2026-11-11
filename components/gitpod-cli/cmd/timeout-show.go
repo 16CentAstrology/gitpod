@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	gitpod "github.com/gitpod-io/gitpod/gitpod-cli/pkg/gitpod"
+	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/gitpod"
 	"github.com/spf13/cobra"
 )
 
@@ -17,33 +17,33 @@ import (
 var showTimeoutCommand = &cobra.Command{
 	Use:   "show",
 	Short: "Show the current workspace timeout",
-	Run: func(_ *cobra.Command, _ []string) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 		defer cancel()
 		wsInfo, err := gitpod.GetWSInfo(ctx)
 		if err != nil {
-			fail(err.Error())
+			return err
 		}
 		client, err := gitpod.ConnectToServer(ctx, wsInfo, []string{
 			"function:getWorkspaceTimeout",
 			"resource:workspace::" + wsInfo.WorkspaceId + "::get/update",
 		})
 		if err != nil {
-			fail(err.Error())
+			return err
 		}
+		defer client.Close()
 
 		res, err := client.GetWorkspaceTimeout(ctx, wsInfo.WorkspaceId)
 		if err != nil {
-			fail(err.Error())
+			return err
+		}
+		duration, err := time.ParseDuration(res.Duration)
+		if err != nil {
+			return err
 		}
 
-		// Try to use `DurationRaw` but fall back to `Duration` in case of
-		// old server component versions that don't expose it.
-		if res.DurationRaw != "" {
-			fmt.Println(res.DurationRaw)
-		} else {
-			fmt.Println(res.Duration)
-		}
+		fmt.Printf("Workspace timeout is set to %s.\n", getHumanReadableDuration(res.HumanReadableDuration, duration))
+		return nil
 	},
 }
 

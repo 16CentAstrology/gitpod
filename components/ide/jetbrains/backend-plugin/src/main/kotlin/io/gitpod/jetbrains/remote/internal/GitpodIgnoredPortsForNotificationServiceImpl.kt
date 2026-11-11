@@ -4,7 +4,6 @@
 
 package io.gitpod.jetbrains.remote.internal
 
-import com.intellij.idea.getServerFutureAsync
 import io.gitpod.jetbrains.remote.GitpodIgnoredPortsForNotificationService
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
@@ -17,7 +16,6 @@ class GitpodIgnoredPortsForNotificationServiceImpl : GitpodIgnoredPortsForNotifi
     init {
         GlobalScope.launch {
             BuiltInServerManager.getInstance().waitForStart().port.let { ignorePort(it) }
-            getServerFutureAsync().await()?.port?.let { ignorePort(it) }
         }
     }
 

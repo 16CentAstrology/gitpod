@@ -6,10 +6,12 @@
 
 import uuid = require("uuid");
 import * as chai from "chai";
-import { suite, test, timeout } from "mocha-typescript";
+import { suite, test, timeout } from "@testdeck/mocha";
 import { testContainer } from "../test-container";
 import { CodeSyncResourceDB } from "./code-sync-resource-db";
 import { IUserDataManifest, SyncResource } from "./entity/db-code-sync-resource";
+import { resetDB } from "../test/reset-db";
+import { TypeORM } from "./typeorm";
 const expect = chai.expect;
 
 @suite(timeout(10000))
@@ -23,8 +25,7 @@ export class CodeSyncResourceDBSpec {
     }
 
     async after(): Promise<void> {
-        await this.db.deleteSettingsSyncResources(this.userId, () => Promise.resolve());
-        await this.db.deleteCollection(this.userId, undefined, () => Promise.resolve());
+        await resetDB(testContainer.get<TypeORM>(TypeORM));
     }
 
     @test()
@@ -58,6 +59,30 @@ export class CodeSyncResourceDBSpec {
         expect(rev).not.to.be.undefined;
         expect(rev).not.to.eq(latest?.rev);
         expect(inserted).to.be.true;
+    }
+
+    @test()
+    async getLatestRevision(): Promise<void> {
+        const kind = "machines";
+
+        // Returns "0" when no resources exist
+        let latestRev = await this.db.getLatestRevision(this.userId, kind, undefined);
+        expect(latestRev).to.equal("0");
+
+        // Returns the rev of the most recent insert
+        const rev1 = await this.db.insert(this.userId, kind, undefined, undefined, async () => {});
+        latestRev = await this.db.getLatestRevision(this.userId, kind, undefined);
+        expect(latestRev).to.equal(rev1);
+
+        // Returns the newest rev after a second insert
+        const rev2 = await this.db.insert(this.userId, kind, undefined, undefined, async () => {});
+        latestRev = await this.db.getLatestRevision(this.userId, kind, undefined);
+        expect(latestRev).to.equal(rev2);
+        expect(latestRev).not.to.equal(rev1);
+
+        // Can be used to successfully insert with the correct rev
+        const rev3 = await this.db.insert(this.userId, kind, undefined, latestRev, async () => {});
+        expect(rev3).not.to.be.undefined;
     }
 
     @test()
@@ -103,7 +128,7 @@ export class CodeSyncResourceDBSpec {
             },
         });
 
-        let extensionsRev = await this.db.insert(
+        const extensionsRev = await this.db.insert(
             this.userId,
             SyncResource.Extensions,
             undefined,
@@ -141,7 +166,7 @@ export class CodeSyncResourceDBSpec {
                 return;
             }
 
-            for (let rev of oldRevs) {
+            for (const rev of oldRevs) {
                 await this.db.deleteResource(this.userId, kind, rev, undefined, async () => {});
             }
         };
@@ -310,7 +335,7 @@ export class CodeSyncResourceDBSpec {
             },
         });
 
-        let extensionsRev = await this.db.insert(
+        const extensionsRev = await this.db.insert(
             this.userId,
             SyncResource.Extensions,
             collection1,
@@ -354,7 +379,7 @@ export class CodeSyncResourceDBSpec {
 
         const collection2 = await this.db.createCollection(this.userId);
 
-        let keybindingsRev = await this.db.insert(
+        const keybindingsRev = await this.db.insert(
             this.userId,
             SyncResource.Keybindings,
             collection2,

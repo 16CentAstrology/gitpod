@@ -1,5 +1,6 @@
 {
     "compilerOptions": {
+        "incremental": true,
         "strict": true,
         "noEmitOnError": false,
         "noUnusedLocals": true,
@@ -9,21 +10,21 @@
         "downlevelIteration": true,
         "module": "commonjs",
         "moduleResolution": "node",
-        "target": "es6",
+        "target": "ES2018",
         "jsx": "react",
         "lib": [
             "es6",
-            "es2016",
+            "es2018",
             "dom",
-            "esnext.asynciterable"
+            "ES2018.Regexp"
         ],
         "sourceMap": true,
         "declaration": true,
         "declarationMap": true,
         "skipLibCheck": true,
-        "rootDir": "src",
         "outDir": "lib",
-        "useUnknownInCatchVariables": false
+        "useUnknownInCatchVariables": false,
+        "esModuleInterop": true
     },
     "include": [
         "src"

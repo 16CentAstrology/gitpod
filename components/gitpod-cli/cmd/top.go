@@ -8,14 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
-	"sync"
 	"time"
 
-	supervisor_helper "github.com/gitpod-io/gitpod/gitpod-cli/pkg/supervisor-helper"
+	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/supervisor"
 	"github.com/gitpod-io/gitpod/supervisor/api"
-	supervisor "github.com/gitpod-io/gitpod/supervisor/api"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/gitpod-io/gitpod/gitpod-cli/pkg/utils"
 
@@ -29,64 +27,67 @@ var topCmdOpts struct {
 }
 
 type topData struct {
-	Resources      *supervisor.ResourcesStatusResponse              `json:"resources"`
-	WorkspaceClass *supervisor.WorkspaceInfoResponse_WorkspaceClass `json:"workspace_class"`
+	Resources      *api.ResourcesStatusResponse              `json:"resources"`
+	WorkspaceClass *api.WorkspaceInfoResponse_WorkspaceClass `json:"workspace_class"`
 }
 
 var topCmd = &cobra.Command{
 	Use:   "top",
 	Short: "Display usage of workspace resources (CPU and memory)",
-	Run: func(cmd *cobra.Command, args []string) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 		defer cancel()
 
-		conn, err := supervisor_helper.Dial(ctx)
+		client, err := supervisor.New(ctx)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
-
-		defer conn.Close()
+		defer client.Close()
 
 		data := &topData{}
 
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		go func() {
-			workspaceResources, err := supervisor_helper.GetWorkspaceResources(ctx, conn)
+		g, ctx := errgroup.WithContext(ctx)
+		g.Go(func() error {
+			workspaceResources, err := client.Status.ResourcesStatus(ctx, &api.ResourcesStatuRequest{})
 			if err != nil {
-				log.Fatalf("cannot get workspace resources: %s", err)
+				return err
 			}
 			data.Resources = workspaceResources
-			wg.Done()
-		}()
+			return nil
+		})
 
-		go func() {
-			if wsInfo, err := supervisor.NewInfoServiceClient(conn).WorkspaceInfo(ctx, &supervisor.WorkspaceInfoRequest{}); err == nil {
-				data.WorkspaceClass = wsInfo.WorkspaceClass
+		g.Go(func() error {
+			wsInfo, err := client.Info.WorkspaceInfo(ctx, &api.WorkspaceInfoRequest{})
+			if err != nil {
+				return err
 			}
-			wg.Done()
-		}()
+			data.WorkspaceClass = wsInfo.WorkspaceClass
+			return nil
+		})
 
-		wg.Wait()
+		err = g.Wait()
+		if err != nil {
+			return err
+		}
 
 		if topCmdOpts.Json {
 			content, _ := json.Marshal(data)
 			fmt.Println(string(content))
-			return
+			return nil
 		}
 		outputTable(data.Resources, data.WorkspaceClass)
+		return nil
 	},
 }
 
-func formatWorkspaceClass(workspaceClass *supervisor.WorkspaceInfoResponse_WorkspaceClass) string {
+func formatWorkspaceClass(workspaceClass *api.WorkspaceInfoResponse_WorkspaceClass) string {
 	if workspaceClass == nil || workspaceClass.DisplayName == "" {
 		return ""
 	}
 	return fmt.Sprintf("%s: %s", workspaceClass.DisplayName, workspaceClass.Description)
 }
 
-func outputTable(workspaceResources *supervisor.ResourcesStatusResponse, workspaceClass *supervisor.WorkspaceInfoResponse_WorkspaceClass) {
+func outputTable(workspaceResources *api.ResourcesStatusResponse, workspaceClass *api.WorkspaceInfoResponse_WorkspaceClass) {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetBorder(false)
 	table.SetColWidth(50)

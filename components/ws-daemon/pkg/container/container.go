@@ -8,6 +8,9 @@ import (
 	"context"
 
 	"golang.org/x/xerrors"
+
+	"github.com/containerd/containerd/api/types/task"
+	workspacev1 "github.com/gitpod-io/gitpod/ws-manager/api/crd/v1"
 )
 
 // Runtime abstracts over the different container runtimes out there w.r.t. to the features we need from those runtimes
@@ -47,6 +50,15 @@ type Runtime interface {
 
 	// IsContainerdReady returns is the status of containerd.
 	IsContainerdReady(ctx context.Context) (bool, error)
+
+	GetContainerImageInfo(ctx context.Context, id ID) (*workspacev1.WorkspaceImageInfo, error)
+
+	// DisposeContainer removes a stopped container, and everything we know about it
+	DisposeContainer(ctx context.Context, workspaceInstanceID string)
+
+	GetContainerTaskInfo(ctx context.Context, id ID) (*task.Process, error)
+
+	ForceKillContainerTask(ctx context.Context, id ID) error
 }
 
 var (

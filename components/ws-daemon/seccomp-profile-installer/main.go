@@ -8,26 +8,36 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"syscall"
 
 	"github.com/containerd/containerd/contrib/seccomp"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
-func main() {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-
+func defaultWorkspaceSeccompProfile(capabilities []string) *specs.LinuxSeccomp {
 	spec := specs.Spec{
 		Process: &specs.Process{
 			Capabilities: &specs.LinuxCapabilities{
-				Bounding: os.Args[1:],
+				Bounding: capabilities,
 			},
 		},
 	}
 
 	s := seccomp.DefaultProfile(&spec)
 	s.Syscalls = append(s.Syscalls,
+		// AF_ALG exposes the kernel crypto API via sockets. Blocking only this
+		// family keeps regular networking intact while removing the copy.fail path.
+		specs.LinuxSyscall{
+			Names:  []string{"socket"},
+			Action: specs.ActErrno,
+			Args: []specs.LinuxSeccompArg{
+				{
+					Index: 0,
+					Value: syscall.AF_ALG,
+					Op:    specs.OpEqualTo,
+				},
+			},
+		},
 		specs.LinuxSyscall{
 			Names: []string{
 				"clone",
@@ -39,6 +49,9 @@ func main() {
 				"setdomainname",
 				"sethostname",
 				"unshare",
+				"keyctl",
+				"add_key",
+				"request_key",
 			},
 			Action: specs.ActAllow,
 		},
@@ -54,15 +67,17 @@ func main() {
 			Names:  []string{"setns"},
 			Action: specs.ActAllow,
 		},
-		specs.LinuxSyscall{
-			Names: []string{
-				"keyctl",
-			},
-			// prevent call and return ENOSYS to make runc happy
-			// (see https://github.com/opencontainers/runc/issues/1889)
-			Action: specs.ActTrace,
-		},
 	)
+
+	return s
+}
+
+func main() {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+
+	s := defaultWorkspaceSeccompProfile(os.Args[1:])
 
 	err := enc.Encode(s)
 	if err != nil {

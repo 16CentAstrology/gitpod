@@ -6,24 +6,20 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
 	"time"
 
 	"golang.org/x/xerrors"
-	"google.golang.org/grpc/credentials/insecure"
+	"k8s.io/klog/v2"
 
+	"github.com/bombsimon/logrusr/v2"
 	"github.com/heptiolabs/healthcheck"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/health/grpc_health_v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/gitpod-io/gitpod/common-go/baseserver"
-	common_grpc "github.com/gitpod-io/gitpod/common-go/grpc"
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/watch"
 	"github.com/gitpod-io/gitpod/ws-daemon/pkg/config"
@@ -45,26 +41,29 @@ var runCmd = &cobra.Command{
 
 		createLVMDevices()
 
+		baseLogger := logrusr.New(log.Log)
+		ctrl.SetLogger(baseLogger)
+		// Set the logger used by k8s (e.g. client-go).
+		klog.SetLogger(baseLogger)
+
+		dmn, err := daemon.NewDaemon(cfg.Daemon)
+		if err != nil {
+			log.WithError(err).Fatal("Cannot create daemon.")
+		}
+
 		health := healthcheck.NewHandler()
 		srv, err := baseserver.New(grpcServerName,
 			baseserver.WithGRPC(&cfg.Service),
 			baseserver.WithHealthHandler(health),
+			baseserver.WithMetricsRegistry(dmn.MetricsRegistry()),
 			baseserver.WithVersion(Version),
 		)
 		if err != nil {
 			log.WithError(err).Fatal("Cannot set up server.")
 		}
 
-		dmn, err := daemon.NewDaemon(cfg.Daemon, prometheus.WrapRegistererWithPrefix("gitpod_ws_daemon_", srv.MetricsRegistry()))
-		if err != nil {
-			log.WithError(err).Fatal("Cannot create daemon.")
-		}
-
-		health.AddReadinessCheck("grpc-server", grpcProbe(cfg.Service))
 		health.AddReadinessCheck("ws-daemon", dmn.ReadinessProbe())
 		health.AddReadinessCheck("disk-space", freeDiskSpace(cfg.Daemon))
-
-		dmn.Register(srv.GRPC())
 
 		err = dmn.Start()
 		if err != nil {
@@ -107,45 +106,6 @@ var runCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(runCmd)
-}
-
-func grpcProbe(cfg baseserver.ServerConfiguration) func() error {
-	return func() error {
-		creds := insecure.NewCredentials()
-		if cfg.TLS != nil && cfg.TLS.CertPath != "" {
-			tlsConfig, err := common_grpc.ClientAuthTLSConfig(
-				cfg.TLS.CAPath, cfg.TLS.CertPath, cfg.TLS.KeyPath,
-				common_grpc.WithSetRootCAs(true),
-				common_grpc.WithServerName(grpcServerName),
-			)
-			if err != nil {
-				return fmt.Errorf("cannot load ws-daemon certificate: %w", err)
-			}
-
-			creds = credentials.NewTLS(tlsConfig)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		conn, err := grpc.DialContext(ctx, cfg.Address, grpc.WithTransportCredentials(creds))
-		if err != nil {
-			return err
-		}
-		defer conn.Close()
-
-		client := grpc_health_v1.NewHealthClient(conn)
-		check, err := client.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
-		if err != nil {
-			return err
-		}
-
-		if check.Status == grpc_health_v1.HealthCheckResponse_SERVING {
-			return nil
-		}
-
-		return fmt.Errorf("grpc service not ready")
-	}
 }
 
 // createLVMDevices creates LVM logical volume special files missing when we run inside a container.

@@ -8,14 +8,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/containerd/containerd/remotes"
 	dockerremote "github.com/containerd/containerd/remotes/docker"
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/opencontainers/go-digest"
 	"github.com/opentracing/opentracing-go"
 	"golang.org/x/xerrors"
@@ -32,6 +33,14 @@ var (
 
 	// ErrNotFound is returned when we're not authorized to return the reference
 	ErrUnauthorized = xerrors.Errorf("not authorized")
+
+	// TooManyRequestsMatcher returns true if an error is a code 429 "Too Many Requests" error
+	TooManyRequestsMatcher = func(err error) bool {
+		if err == nil {
+			return false
+		}
+		return strings.Contains(err.Error(), "429 Too Many Requests")
+	}
 )
 
 // StandaloneRefResolver can resolve image references without a Docker daemon
@@ -54,14 +63,24 @@ func (sr *StandaloneRefResolver) Resolve(ctx context.Context, ref string, opts .
 
 	var r remotes.Resolver
 	if sr.ResolverFactory == nil {
-		r = dockerremote.NewResolver(dockerremote.ResolverOptions{
-			Authorizer: dockerremote.NewDockerAuthorizer(dockerremote.WithAuthCreds(func(host string) (username, password string, err error) {
+		registryOpts := []dockerremote.RegistryOpt{
+			dockerremote.WithAuthorizer(dockerremote.NewDockerAuthorizer(dockerremote.WithAuthCreds(func(host string) (username, password string, err error) {
 				if options.Auth == nil {
 					return
 				}
 
 				return options.Auth.Username, options.Auth.Password, nil
-			})),
+			}))),
+		}
+
+		if options.Client != nil {
+			registryOpts = append(registryOpts, dockerremote.WithClient(options.Client))
+		}
+
+		r = dockerremote.NewResolver(dockerremote.ResolverOptions{
+			Hosts: dockerremote.ConfigureDefaultRegistries(
+				registryOpts...,
+			),
 		})
 	} else {
 		r = sr.ResolverFactory()
@@ -69,31 +88,9 @@ func (sr *StandaloneRefResolver) Resolve(ctx context.Context, ref string, opts .
 
 	// The ref may be what Docker calls a "familiar" name, e.g. ubuntu:latest instead of docker.io/library/ubuntu:latest.
 	// To make this a valid digested form we first need to normalize that familiar name.
-	pref, err := reference.ParseNormalizedNamed(ref)
+	pref, err := reference.ParseDockerRef(ref)
 	if err != nil {
 		return "", xerrors.Errorf("cannt resolve image ref: %w", err)
-	}
-
-	// The reference is already in digest form we don't have to do anything
-	if cref, ok := pref.(reference.Canonical); ok {
-		// if reference contain tag, we should remove it to avoid tag and digest conflict
-		if _, ok := pref.(reference.Tagged); ok {
-			dref, err := reference.WithDigest(reference.TrimNamed(pref), cref.Digest())
-			if err != nil {
-				return "", err
-			}
-			ref = dref.String()
-		}
-		span.LogKV("result", ref)
-		return ref, nil
-	}
-
-	// Some users don't specify a tag, and Docker assumes "latest" - we follow the same convention
-	if _, ok := pref.(reference.Tagged); !ok {
-		pref, err = reference.WithTag(pref, "latest")
-		if err != nil {
-			return "", err
-		}
 	}
 
 	nref := pref.String()
@@ -119,7 +116,7 @@ func (sr *StandaloneRefResolver) Resolve(ctx context.Context, ref string, opts .
 		return
 	}
 	defer in.Close()
-	buf, err := ioutil.ReadAll(in)
+	buf, err := io.ReadAll(in)
 	if err != nil {
 		return
 	}
@@ -166,7 +163,8 @@ func (sr *StandaloneRefResolver) Resolve(ctx context.Context, ref string, opts .
 }
 
 type opts struct {
-	Auth *auth.Authentication
+	Auth   *auth.Authentication
+	Client *http.Client
 }
 
 // DockerRefResolverOption configures reference resolution
@@ -174,8 +172,22 @@ type DockerRefResolverOption func(o *opts)
 
 // WithAuthentication sets a base64 encoded authentication for accessing a Docker registry
 func WithAuthentication(auth *auth.Authentication) DockerRefResolverOption {
+	if auth == nil {
+		log.Debug("WithAuthentication - auth was nil")
+	}
+
 	return func(o *opts) {
 		o.Auth = auth
+	}
+}
+
+// WithHttpClient sets the HTTP client to use for making requests to the Docker registry.
+func WithHttpClient(client *http.Client) DockerRefResolverOption {
+	return func(o *opts) {
+		if client == nil {
+			log.Debug("WithHttpClient - client was nil")
+		}
+		o.Client = client
 	}
 }
 
@@ -220,14 +232,14 @@ func (pr *PrecachingRefResolver) StartCaching(ctx context.Context, interval time
 	for {
 		for _, c := range pr.Candidates {
 			var opts []DockerRefResolverOption
-			if pr.Auth != nil {
+			if pr.Auth != ((auth.RegistryAuthenticator)(nil)) {
 				ref, err := reference.ParseNormalizedNamed(c)
 				if err != nil {
 					log.WithError(err).WithField("ref", c).Warn("unable to precache reference: cannot parse")
 					continue
 				}
 
-				auth, err := pr.Auth.Authenticate(reference.Domain(ref))
+				auth, err := pr.Auth.Authenticate(ctx, reference.Domain(ref))
 				if err != nil {
 					log.WithError(err).WithField("ref", c).Warn("unable to precache reference: cannot authenticate")
 					continue

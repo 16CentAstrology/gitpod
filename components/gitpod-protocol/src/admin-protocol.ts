@@ -4,16 +4,14 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { User, Workspace, NamedWorkspaceFeatureFlag } from "./protocol";
+import { User, Workspace, NamedWorkspaceFeatureFlag, EmailDomainFilterEntry } from "./protocol";
 import { BlockedRepository } from "./blocked-repositories-protocol";
 import { FindPrebuildsParams } from "./gitpod-service";
 import { Project, Team, PrebuildWithStatus, TeamMemberInfo, TeamMemberRole } from "./teams-projects-protocol";
 import { WorkspaceInstance, WorkspaceInstancePhase } from "./workspace-instance";
 import { RoleOrPermission } from "./permission";
-import { AccountStatement } from "./accounting-protocol";
 import { BillingMode } from "./billing-mode";
 import { CostCenterJSON, ListUsageRequest, ListUsageResponse } from "./usage";
-import { InstallationAdminSettings, TelemetryData } from "./installation-admin-protocol";
 
 export interface AdminServer {
     adminGetUsers(req: AdminGetListRequest<User>): Promise<AdminGetListResult<User>>;
@@ -24,7 +22,11 @@ export interface AdminServer {
     adminModifyRoleOrPermission(req: AdminModifyRoleOrPermissionRequest): Promise<User>;
     adminModifyPermanentWorkspaceFeatureFlag(req: AdminModifyPermanentWorkspaceFeatureFlagRequest): Promise<User>;
 
-    adminCreateBlockedRepository(urlRegexp: string, blockUser: boolean): Promise<BlockedRepository>;
+    adminCreateBlockedRepository(
+        urlRegexp: string,
+        blockUser: boolean,
+        blockFreeUsage: boolean,
+    ): Promise<BlockedRepository>;
     adminDeleteBlockedRepository(id: number): Promise<void>;
     adminGetBlockedRepositories(
         req: AdminGetListRequest<BlockedRepository>,
@@ -37,6 +39,7 @@ export interface AdminServer {
 
     adminGetWorkspaces(req: AdminGetWorkspacesRequest): Promise<AdminGetListResult<WorkspaceAndInstance>>;
     adminGetWorkspace(id: string): Promise<WorkspaceAndInstance>;
+    adminGetWorkspaceInstances(workspaceId: string): Promise<WorkspaceInstance[]>;
     adminForceStopWorkspace(id: string): Promise<void>;
     adminRestoreSoftDeletedWorkspace(id: string): Promise<void>;
 
@@ -44,17 +47,8 @@ export interface AdminServer {
     adminGetProjectById(id: string): Promise<Project | undefined>;
 
     adminFindPrebuilds(params: FindPrebuildsParams): Promise<PrebuildWithStatus[]>;
-    adminSetLicense(key: string): Promise<void>;
 
-    adminGetAccountStatement(userId: string): Promise<AccountStatement>;
-    adminSetProfessionalOpenSource(userId: string, shouldGetProfOSS: boolean): Promise<void>;
-    adminIsStudent(userId: string): Promise<boolean>;
-    adminAddStudentEmailDomain(userId: string, domain: string): Promise<void>;
-    adminGrantExtraHours(userId: string, extraHours: number): Promise<void>;
     adminGetBillingMode(attributionId: string): Promise<BillingMode>;
-
-    adminGetSettings(): Promise<InstallationAdminSettings>;
-    adminUpdateSettings(settings: InstallationAdminSettings): Promise<void>;
 
     adminGetCostCenter(attributionId: string): Promise<CostCenterJSON | undefined>;
     adminSetUsageLimit(attributionId: string, usageLimit: number): Promise<void>;
@@ -63,10 +57,8 @@ export interface AdminServer {
     adminAddUsageCreditNote(attributionId: string, credits: number, note: string): Promise<void>;
     adminGetUsageBalance(attributionId: string): Promise<number>;
 
-    // Admin Settings
-    adminGetSettings(): Promise<InstallationAdminSettings>;
-    adminUpdateSettings(settings: InstallationAdminSettings): Promise<void>;
-    adminGetTelemetryData(): Promise<TelemetryData>;
+    adminGetBlockedEmailDomains(): Promise<EmailDomainFilterEntry[]>;
+    adminSaveBlockedEmailDomain(entry: EmailDomainFilterEntry): Promise<void>;
 }
 
 export interface AdminGetListRequest<T> {

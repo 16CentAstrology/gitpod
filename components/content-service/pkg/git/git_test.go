@@ -30,7 +30,7 @@ func TestGitStatus(t *testing.T) {
 		{
 			"no commits",
 			func(ctx context.Context, c *Client) error {
-				if err := c.Git(ctx, "init"); err != nil {
+				if err := c.Git(ctx, "init", "--initial-branch=main"); err != nil {
 					return err
 				}
 				return nil
@@ -38,7 +38,7 @@ func TestGitStatus(t *testing.T) {
 			&Status{
 				porcelainStatus: porcelainStatus{
 					BranchOID:  "(initial)",
-					BranchHead: "master",
+					BranchHead: "main",
 				},
 			},
 			nil,
@@ -53,7 +53,7 @@ func TestGitStatus(t *testing.T) {
 			},
 			&Status{
 				porcelainStatus: porcelainStatus{
-					BranchHead: "master",
+					BranchHead: "main",
 					BranchOID:  notEmpty,
 				},
 				LatestCommit: notEmpty,
@@ -73,7 +73,7 @@ func TestGitStatus(t *testing.T) {
 			},
 			&Status{
 				porcelainStatus: porcelainStatus{
-					BranchHead:     "master",
+					BranchHead:     "main",
 					BranchOID:      notEmpty,
 					UntrackedFiles: []string{"another-file"},
 				},
@@ -94,7 +94,7 @@ func TestGitStatus(t *testing.T) {
 			},
 			&Status{
 				porcelainStatus: porcelainStatus{
-					BranchHead:      "master",
+					BranchHead:      "main",
 					BranchOID:       notEmpty,
 					UncommitedFiles: []string{"first-file"},
 				},
@@ -118,7 +118,7 @@ func TestGitStatus(t *testing.T) {
 			},
 			&Status{
 				porcelainStatus: porcelainStatus{
-					BranchHead: "master",
+					BranchHead: "main",
 					BranchOID:  notEmpty,
 				},
 				UnpushedCommits: []string{notEmpty},
@@ -170,7 +170,7 @@ func TestGitStatus(t *testing.T) {
 			},
 			&Status{
 				porcelainStatus: porcelainStatus{
-					BranchHead:     "master",
+					BranchHead:     "main",
 					BranchOID:      notEmpty,
 					UntrackedFiles: []string{"this/is/a/nested/test/first-file"},
 				},
@@ -239,7 +239,7 @@ func TestGitStatusFromFiles(t *testing.T) {
 		{
 			"no commits",
 			func(ctx context.Context, c *Client) error {
-				if err := c.Git(ctx, "init"); err != nil {
+				if err := c.Git(ctx, "init", "--initial-branch=main"); err != nil {
 					return err
 				}
 				return nil
@@ -247,7 +247,7 @@ func TestGitStatusFromFiles(t *testing.T) {
 			&Status{
 				porcelainStatus: porcelainStatus{
 					BranchOID:  "(initial)",
-					BranchHead: "master",
+					BranchHead: "main",
 				},
 			},
 			nil,
@@ -262,7 +262,7 @@ func TestGitStatusFromFiles(t *testing.T) {
 			},
 			&Status{
 				porcelainStatus: porcelainStatus{
-					BranchHead: "master",
+					BranchHead: "main",
 					BranchOID:  notEmpty,
 				},
 				LatestCommit: notEmpty,
@@ -282,7 +282,7 @@ func TestGitStatusFromFiles(t *testing.T) {
 			},
 			&Status{
 				porcelainStatus: porcelainStatus{
-					BranchHead:     "master",
+					BranchHead:     "main",
 					BranchOID:      notEmpty,
 					UntrackedFiles: []string{"another-file"},
 				},
@@ -303,7 +303,7 @@ func TestGitStatusFromFiles(t *testing.T) {
 			},
 			&Status{
 				porcelainStatus: porcelainStatus{
-					BranchHead:      "master",
+					BranchHead:      "main",
 					BranchOID:       notEmpty,
 					UncommitedFiles: []string{"first-file"},
 				},
@@ -327,7 +327,7 @@ func TestGitStatusFromFiles(t *testing.T) {
 			},
 			&Status{
 				porcelainStatus: porcelainStatus{
-					BranchHead: "master",
+					BranchHead: "main",
 					BranchOID:  notEmpty,
 				},
 				UnpushedCommits: []string{notEmpty},
@@ -379,7 +379,7 @@ func TestGitStatusFromFiles(t *testing.T) {
 			},
 			&Status{
 				porcelainStatus: porcelainStatus{
-					BranchHead:     "master",
+					BranchHead:     "main",
 					BranchOID:      notEmpty,
 					UntrackedFiles: []string{"this/is/a/nested/test/first-file"},
 				},
@@ -437,7 +437,7 @@ func TestGitStatusFromFiles(t *testing.T) {
 			}
 
 			gitout, err = client.GitWithOutput(ctx, &errNoCommitsYet, "log", "--pretty=%H", "-n", "1")
-			if err != nil && !strings.Contains(err.Error(), "fatal: your current branch 'master' does not have any commits yet") {
+			if err != nil && !strings.Contains(err.Error(), "fatal: your current branch 'main' does not have any commits yet") {
 				t.Errorf("error calling GitWithOutput: %v", err)
 				return
 			}
@@ -488,8 +488,9 @@ func newGitClient(ctx context.Context) (*Client, error) {
 	return &Client{
 		Location: loc,
 		Config: map[string]string{
-			"user.email": "foo@bar.com",
-			"user.name":  "tester",
+			"user.email":         "foo@bar.com",
+			"user.name":          "tester",
+			"init.defaultBranch": "main",
 		},
 	}, nil
 }
@@ -499,7 +500,7 @@ func initFromRemote(ctx context.Context, c *Client) error {
 	if err != nil {
 		return xerrors.Errorf("cannot add remote: %w", err)
 	}
-	if err := remote.Git(ctx, "init"); err != nil {
+	if err := remote.Git(ctx, "init", "--initial-branch=main"); err != nil {
 		return err
 	}
 	if err := remote.Git(ctx, "config", "--local", "user.email", "foo@bar.com"); err != nil {

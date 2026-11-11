@@ -36,6 +36,13 @@ fs.writeFileSync(path.join(pckDir, "package.json"), JSON.stringify(pck, undefine
 const tag = qualifier.substr(0, qualifier.lastIndexOf("."));
 
 child_process.execSync(
-    ["yarn", "--cwd", pckDir, "publish", "--tag", tag, "--access", "public", "--ignore-scripts"].join(" "),
-    { stdio: "inherit" },
+    [
+        "npm-11.7",
+        "publish",
+        "--tag",
+        tag,
+        "--access",
+        "public",
+    ].join(" "),
+    { stdio: "inherit", cwd: pckDir },
 );

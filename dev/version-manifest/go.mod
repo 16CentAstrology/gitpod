@@ -1,6 +1,10 @@
 module github.com/gitpod-io/gitpod/version-manifest
 
-go 1.19
+go 1.24
+
+toolchain go1.24.13
+
+godebug tlsmlkem=0
 
 require (
 	github.com/google/go-cmp v0.5.7

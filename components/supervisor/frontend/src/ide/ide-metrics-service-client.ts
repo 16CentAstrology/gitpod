@@ -5,16 +5,32 @@
  */
 
 import { serverUrl, workspaceUrl } from "../shared/urls";
-import { GitpodServiceClient } from "./gitpod-service-client";
 const commit = require("../../config.json").commit;
+import { v4 } from "uuid";
+
+import { MetricsReporter } from "@gitpod/gitpod-protocol/lib/metrics";
+
+export const metricsReporter = new MetricsReporter({
+    gitpodUrl: serverUrl.toString(),
+    clientName: "supervisor-frontend",
+    clientVersion: commit,
+    log: console,
+    commonErrorDetails: {
+        sessionId: v4(),
+    },
+});
+metricsReporter.startReporting();
+
+import { FrontendDashboardServiceClient } from "../shared/frontend-dashboard-service";
+
+// TODO(ak) migrate to MetricsReporter
+const MetricsUrl = serverUrl.asIDEMetrics().toString();
 
 export enum MetricsName {
     SupervisorFrontendClientTotal = "gitpod_supervisor_frontend_client_total",
     SupervisorFrontendErrorTotal = "gitpod_supervisor_frontend_error_total",
     SupervisorFrontendLoadTotal = "gitpod_vscode_web_load_total",
 }
-
-const MetricsUrl = serverUrl.asIDEMetrics().toString();
 
 interface AddCounterParam {
     value?: number;
@@ -32,13 +48,14 @@ interface ReportErrorParam {
 }
 export class IDEMetricsServiceClient {
     static workspaceId? = workspaceUrl.workspaceId;
-    static gitpodServiceClient?: GitpodServiceClient;
+    static debugWorkspace = workspaceUrl.debugWorkspace;
+    static serviceClient: FrontendDashboardServiceClient;
 
     static get instanceId(): string {
-        return this.gitpodServiceClient?.info.latestInstance?.id ?? "";
+        return this.serviceClient.latestInfo?.instanceId ?? "";
     }
     static get userId(): string {
-        return this.gitpodServiceClient?.user.id ?? "";
+        return this.serviceClient.latestInfo?.loggedUserId ?? "";
     }
 
     static async addCounter(
@@ -53,6 +70,7 @@ export class IDEMetricsServiceClient {
                 method: "POST",
                 body: JSON.stringify(params),
                 credentials: "omit",
+                priority: "low",
             });
             if (!response.ok) {
                 const data = await response.json(); // { code: number; message: string; }
@@ -70,6 +88,7 @@ export class IDEMetricsServiceClient {
         const p = Object.assign({}, properties);
         p.error_name = error.name;
         p.error_message = error.message;
+        p.debug_workspace = String(this.debugWorkspace);
 
         const url = `${MetricsUrl}/reportError`;
         const params: ReportErrorParam = {
@@ -99,7 +118,7 @@ export class IDEMetricsServiceClient {
         }
     }
 
-    static loadWorkspaceInfo(gitpodServiceClient: GitpodServiceClient) {
-        this.gitpodServiceClient = gitpodServiceClient;
+    static loadWorkspaceInfo(serviceClient: FrontendDashboardServiceClient) {
+        this.serviceClient = serviceClient;
     }
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/ws-manager/api"
+	"github.com/gitpod-io/gitpod/ws-proxy/pkg/common"
 )
 
 func TestWorkspaceAuthHandler(t *testing.T) {
@@ -34,8 +36,8 @@ func TestWorkspaceAuthHandler(t *testing.T) {
 		testPort    = 8080
 	)
 	var (
-		ownerOnlyInfos = map[string]*WorkspaceInfo{
-			workspaceID: {
+		ownerOnlyInfos = []common.WorkspaceInfo{
+			{
 				WorkspaceID: workspaceID,
 				InstanceID:  instanceID,
 				Auth: &api.WorkspaceAuthentication{
@@ -45,8 +47,8 @@ func TestWorkspaceAuthHandler(t *testing.T) {
 				Ports: []*api.PortSpec{{Port: testPort, Visibility: api.PortVisibility_PORT_VISIBILITY_PRIVATE}},
 			},
 		}
-		publicPortInfos = map[string]*WorkspaceInfo{
-			workspaceID: {
+		publicPortInfos = []common.WorkspaceInfo{
+			{
 				WorkspaceID: workspaceID,
 				InstanceID:  instanceID,
 				Auth: &api.WorkspaceAuthentication{
@@ -56,8 +58,8 @@ func TestWorkspaceAuthHandler(t *testing.T) {
 				Ports: []*api.PortSpec{{Port: testPort, Visibility: api.PortVisibility_PORT_VISIBILITY_PUBLIC}},
 			},
 		}
-		admitEveryoneInfos = map[string]*WorkspaceInfo{
-			workspaceID: {
+		admitEveryoneInfos = []common.WorkspaceInfo{
+			{
 				WorkspaceID: workspaceID,
 				InstanceID:  instanceID,
 				Auth:        &api.WorkspaceAuthentication{Admission: api.AdmissionLevel_ADMIT_EVERYONE},
@@ -66,7 +68,7 @@ func TestWorkspaceAuthHandler(t *testing.T) {
 	)
 	tests := []struct {
 		Name        string
-		Infos       map[string]*WorkspaceInfo
+		Infos       []common.WorkspaceInfo
 		OwnerCookie string
 		WorkspaceID string
 		Port        string
@@ -223,7 +225,7 @@ func TestWorkspaceAuthHandler(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
 			var res testResult
-			handler := WorkspaceAuthHandler(domain, &fixedInfoProvider{Infos: test.Infos})(http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+			handler := WorkspaceAuthHandler(domain, &fakeWsInfoProvider{infos: test.Infos})(http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 				res.HandlerCalled = true
 				resp.WriteHeader(http.StatusOK)
 			}))
@@ -231,13 +233,13 @@ func TestWorkspaceAuthHandler(t *testing.T) {
 			rr := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/", domain), nil)
 			if test.OwnerCookie != "" {
-				setOwnerTokenCookie(req, instanceID, test.OwnerCookie)
+				setOwnerTokenCookie(req, domain, instanceID, test.OwnerCookie)
 			}
 			vars := map[string]string{
-				workspaceIDIdentifier: test.WorkspaceID,
+				common.WorkspaceIDIdentifier: test.WorkspaceID,
 			}
 			if test.Port != "" {
-				vars[workspacePortIdentifier] = test.Port
+				vars[common.WorkspacePortIdentifier] = test.Port
 			}
 			req = mux.SetURLVars(req, vars)
 
@@ -251,6 +253,13 @@ func TestWorkspaceAuthHandler(t *testing.T) {
 	}
 }
 
-func setOwnerTokenCookie(r *http.Request, instanceID, token string) {
-	r.AddCookie(&http.Cookie{Name: "_test_domain_com_ws_" + instanceID + "_owner_", Value: token})
+func setOwnerTokenCookie(r *http.Request, domain, instanceID, token string) {
+	c := ownerTokenCookie(domain, instanceID, token)
+	r.AddCookie(c)
+}
+
+func ownerTokenCookie(domain, instanceID, token string) *http.Cookie {
+	domainPart := strings.ReplaceAll(domain, ".", "_")
+	domainPart = strings.ReplaceAll(domainPart, "-", "_")
+	return &http.Cookie{Name: "_" + domainPart + "_ws_" + instanceID + "_owner_", Value: token}
 }

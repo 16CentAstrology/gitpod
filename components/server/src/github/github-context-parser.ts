@@ -15,13 +15,16 @@ import {
     CommitContext,
     RefType,
 } from "@gitpod/gitpod-protocol";
-import { GitHubGraphQlEndpoint } from "./api";
+import { GitHubGraphQlEndpoint, QueryResult } from "./api";
 import { NotFoundError, UnauthorizedError } from "../errors";
 import { log, LogContext, LogPayload } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { IContextParser, IssueContexts, AbstractContextParser } from "../workspace/context-parser";
-import { GitHubScope } from "./scopes";
 import { GitHubTokenHelper } from "./github-token-helper";
 import { TraceContext } from "@gitpod/gitpod-protocol/lib/util/tracing";
+import { RepoURL } from "../repohost";
+import { containsScopes } from "../prebuilds/token-scopes-inclusion";
+import { TrustedValue } from "@gitpod/gitpod-protocol/lib/util/scrubbing";
+import { GitHubOAuthScopes } from "@gitpod/public-api-common/lib/auth-providers";
 
 @injectable()
 export class GithubContextParser extends AbstractContextParser implements IContextParser {
@@ -86,20 +89,17 @@ export class GithubContextParser extends AbstractContextParser implements IConte
             }
             return await this.handleDefaultContext({ span }, user, host, owner, repoName);
         } catch (error) {
-            if (error && error.code === 401) {
+            if (error && (error.code === 401 || error.message === "Unauthorized")) {
                 const token = await this.tokenHelper.getCurrentToken(user);
-                if (token) {
-                    const scopes = token.scopes;
-                    // most likely the token needs to be updated after revoking by user.
-                    throw UnauthorizedError.create(this.config.host, scopes, "http-unauthorized");
-                }
-                // todo@alex: this is very unlikely. is coercing it into a valid case helpful?
-                // here, GH API responded with a 401 code, and we are missing a token. OTOH, a missing token would not lead to a request.
-                throw UnauthorizedError.create(
-                    this.config.host,
-                    GitHubScope.Requirements.PUBLIC_REPO,
-                    "missing-identity",
-                );
+
+                throw UnauthorizedError.create({
+                    host: this.config.host,
+                    providerType: "GitHub",
+                    requiredScopes: GitHubOAuthScopes.Requirements.PUBLIC_REPO,
+                    repoName: RepoURL.parseRepoUrl(contextUrl)?.repo,
+                    providerIsConnected: !!token,
+                    isMissingScopes: containsScopes(token?.scopes, GitHubOAuthScopes.Requirements.PUBLIC_REPO),
+                });
             }
             throw error;
         } finally {
@@ -117,9 +117,7 @@ export class GithubContextParser extends AbstractContextParser implements IConte
         const span = TraceContext.startSpan("GithubContextParser.handleDefaultContext", ctx);
 
         try {
-            const result: any = await this.githubQueryApi.runQuery(
-                user,
-                `
+            const query = `
                 query {
                     repository(name: "${repoName}", owner: "${owner}") {
                         ${this.repoProperties()}
@@ -131,17 +129,23 @@ export class GithubContextParser extends AbstractContextParser implements IConte
                         },
                     }
                 }
-            `,
-            );
+            `;
+            const result: QueryResult<any> = await this.githubQueryApi.runQuery(user, query);
             span.log({ "request.finished": "" });
 
+            if (result.errors) {
+                log.error("Errors executing query.", { query, errors: new TrustedValue(result.errors) });
+            }
+
             if (result.data.repository === null) {
+                log.warn(`Repository not found.`, { query });
                 throw await NotFoundError.create(
                     await this.tokenHelper.getCurrentToken(user),
                     user,
                     this.config.host,
                     owner,
                     repoName,
+                    result.errors && result.errors.map((e: any) => e.message).join(", "),
                 );
             }
             const defaultBranch = result.data.repository.defaultBranchRef;
@@ -153,7 +157,7 @@ export class GithubContextParser extends AbstractContextParser implements IConte
                 title: `${owner}/${repoName} ${defaultBranch ? "- " + defaultBranch.name : ""}`,
                 ref,
                 refType,
-                revision: (defaultBranch && defaultBranch.target.oid) || "",
+                revision: (defaultBranch && defaultBranch.target?.oid) || "",
                 repository: this.toRepository(host, result.data.repository),
             };
         } catch (e) {
@@ -185,12 +189,16 @@ export class GithubContextParser extends AbstractContextParser implements IConte
                 const path = decodeURIComponent(segments.slice(i).join("/"));
                 // Sanitize path expression to prevent GraphQL injections (e.g. escape any `"` or `\n`).
                 const pathExpression = JSON.stringify(`${branchNameOrCommitHash}:${path}`);
-                const result: any = await this.githubQueryApi.runQuery(
-                    user,
-                    `
+                const query = `
                     query {
                         repository(name: "${repoName}", owner: "${owner}") {
                             ${this.repoProperties()}
+                            defaultBranchRef {
+                                name,
+                                target {
+                                    oid
+                                }
+                            }
                             path: object(expression: ${pathExpression}) {
                                 ... on Blob {
                                     oid
@@ -208,18 +216,23 @@ export class GithubContextParser extends AbstractContextParser implements IConte
                             }
                         }
                     }
-                `,
-                );
+                `;
+                const result: QueryResult<any> = await this.githubQueryApi.runQuery(user, query);
                 span.log({ "request.finished": "" });
+                if (result.errors) {
+                    log.error("Errors executing query.", { query, errors: new TrustedValue(result.errors) });
+                }
 
                 const repo = result.data.repository;
                 if (repo === null) {
+                    log.warn(`Repository not found.`, { query });
                     throw await NotFoundError.create(
                         await this.tokenHelper.getCurrentToken(user),
                         user,
                         this.config.host,
                         owner,
                         repoName,
+                        result.errors && result.errors.map((e: any) => e.message).join(", "),
                     );
                 }
 
@@ -228,6 +241,7 @@ export class GithubContextParser extends AbstractContextParser implements IConte
                 if (repo.ref !== null) {
                     return {
                         ref: repo.ref.name,
+                        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
                         refType: this.toRefType({ userId: user.id }, { host, owner, repoName }, repo.ref.prefix),
                         isFile,
                         path,
@@ -287,9 +301,7 @@ export class GithubContextParser extends AbstractContextParser implements IConte
         }
 
         try {
-            const result: any = await this.githubQueryApi.runQuery(
-                user,
-                `
+            const query = `
                 query {
                     repository(name: "${repoName}", owner: "${owner}") {
                         object(oid: "${sha}") {
@@ -307,17 +319,24 @@ export class GithubContextParser extends AbstractContextParser implements IConte
                         },
                     }
                 }
-            `,
-            );
+            `;
+            const result: QueryResult<any> = await this.githubQueryApi.runQuery(user, query);
             span.log({ "request.finished": "" });
 
+            if (result.errors) {
+                log.error("Errors executing query.", { query, errors: new TrustedValue(result.errors) });
+            }
+
             if (result.data.repository === null) {
+                log.warn(`Repository not found.`, { query });
+
                 throw await NotFoundError.create(
                     await this.tokenHelper.getCurrentToken(user),
                     user,
                     this.config.host,
                     owner,
                     repoName,
+                    result.errors && result.errors.map((e: any) => e.message).join(", "),
                 );
             }
 
@@ -356,9 +375,7 @@ export class GithubContextParser extends AbstractContextParser implements IConte
         const span = TraceContext.startSpan("handlePullRequestContext", ctx);
 
         try {
-            const result: any = await this.githubQueryApi.runQuery(
-                user,
-                `
+            const query = `
                 query {
                     repository(name: "${repoName}", owner: "${owner}") {
                         pullRequest(number: ${pullRequestNr}) {
@@ -367,6 +384,12 @@ export class GithubContextParser extends AbstractContextParser implements IConte
                                 name
                                 repository {
                                     ${this.repoProperties()}
+                                    defaultBranchRef {
+                                        name,
+                                        target {
+                                            oid
+                                        }
+                                    }
                                 }
                                 target {
                                     oid
@@ -376,6 +399,12 @@ export class GithubContextParser extends AbstractContextParser implements IConte
                                 name
                                 repository {
                                     ${this.repoProperties()}
+                                    defaultBranchRef {
+                                        name,
+                                        target {
+                                            oid
+                                        }
+                                    }
                                 }
                                 target {
                                     oid
@@ -384,17 +413,24 @@ export class GithubContextParser extends AbstractContextParser implements IConte
                         }
                     }
                 }
-            `,
-            );
+            `;
+            const result: QueryResult<any> = await this.githubQueryApi.runQuery(user, query);
             span.log({ "request.finished": "" });
 
+            if (result.errors) {
+                log.error("Errors executing query.", { query, errors: new TrustedValue(result.errors) });
+            }
+
             if (result.data.repository === null) {
+                log.warn(`Repository not found.`, { query });
+
                 throw await NotFoundError.create(
                     await this.tokenHelper.getCurrentToken(user),
                     user,
                     this.config.host,
                     owner,
                     repoName,
+                    result.errors && result.errors.map((e: any) => e.message).join(", "),
                 );
             }
             const pr = result.data.repository.pullRequest;
@@ -446,9 +482,7 @@ export class GithubContextParser extends AbstractContextParser implements IConte
         const span = TraceContext.startSpan("handleIssueContext", ctx);
 
         try {
-            const result: any = await this.githubQueryApi.runQuery(
-                user,
-                `
+            const query = `
                 query {
                     repository(name: "${repoName}", owner: "${owner}") {
                         issue(number: ${issueNr}) {
@@ -463,17 +497,24 @@ export class GithubContextParser extends AbstractContextParser implements IConte
                         },
                     }
                 }
-            `,
-            );
+            `;
+            const result: QueryResult<any> = await this.githubQueryApi.runQuery(user, query);
             span.log({ "request.finished": "" });
 
+            if (result.errors) {
+                log.error("Errors executing query.", { query, errors: new TrustedValue(result.errors) });
+            }
+
             if (result.data.repository === null) {
+                log.warn(`Repository not found.`, { query });
+
                 throw await NotFoundError.create(
                     await this.tokenHelper.getCurrentToken(user),
                     user,
                     this.config.host,
                     owner,
                     repoName,
+                    result.errors && result.errors.map((e: any) => e.message).join(", "),
                 );
             }
             const issue = result.data.repository.issue;
@@ -517,9 +558,11 @@ export class GithubContextParser extends AbstractContextParser implements IConte
         if (repoQueryResult === null) {
             throw new Error("Unknown repository.");
         }
+        const defaultBranch = repoQueryResult?.defaultBranchRef?.name;
         const result: Repository = {
             cloneUrl: repoQueryResult.url + ".git",
             host,
+            defaultBranch,
             name: repoQueryResult.name,
             owner: repoQueryResult.owner.login,
             private: !!repoQueryResult.isPrivate,

@@ -304,6 +304,7 @@ func newGitInitializer(ctx context.Context, loc string, req *csapi.GitInitialize
 			AuthMethod:        authMethod,
 			AuthProvider:      authProvider,
 			RunAsGitpodUser:   forceGitpodUser,
+			FullClone:         req.FullClone,
 		},
 		TargetMode:  targetMode,
 		CloneTarget: req.CloneTaget,
@@ -467,20 +468,38 @@ func InitializeWorkspace(ctx context.Context, location string, remoteStorage sto
 		}
 	}
 
-	// Run the initializer
+	// Try to download a backup first
+	initialSize, fsErr := getFsUsage()
+	if fsErr != nil {
+		log.WithError(fsErr).Error("could not get disk usage")
+	}
+	downloadStart := time.Now()
 	hasBackup, err := remoteStorage.Download(ctx, location, storage.DefaultBackup, cfg.mappings)
 	if err != nil {
 		return src, nil, xerrors.Errorf("cannot restore backup: %w", err)
 	}
+	downloadDuration := time.Since(downloadStart)
 
 	span.SetTag("hasBackup", hasBackup)
 	if hasBackup {
 		src = csapi.WorkspaceInitFromBackup
-	} else {
-		src, stats, err = cfg.Initializer.Run(ctx, cfg.mappings)
-		if err != nil {
-			return src, nil, xerrors.Errorf("cannot initialize workspace: %w", err)
+
+		currentSize, fsErr := getFsUsage()
+		if fsErr != nil {
+			log.WithError(fsErr).Error("could not get disk usage")
 		}
+		stats = []csapi.InitializerMetric{{
+			Type:     "fromBackup",
+			Duration: downloadDuration,
+			Size:     currentSize - initialSize,
+		}}
+		return
+	}
+
+	// If there is not backup, run the initializer
+	src, stats, err = cfg.Initializer.Run(ctx, cfg.mappings)
+	if err != nil {
+		return src, nil, xerrors.Errorf("cannot initialize workspace: %w", err)
 	}
 
 	return
@@ -570,6 +589,8 @@ func PlaceWorkspaceReadyFile(ctx context.Context, wspath string, initsrc csapi.W
 	if err != nil {
 		return xerrors.Errorf("cannot rename workspace ready file: %w", err)
 	}
+
+	log.WithField("content", string(fc)).WithField("destination", wspath).Info("ready file metrics")
 
 	return nil
 }

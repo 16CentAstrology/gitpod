@@ -1,0 +1,9 @@
+packages:
+  - name: docker
+    type: docker
+    config:
+      dockerfile: leeway.Dockerfile
+      buildArgs:
+        VERSION: ${ipfsKuboVersion}
+      image:
+        - ${imageRepoBase}/ipfs/kubo:${ipfsKuboVersion}

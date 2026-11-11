@@ -13,11 +13,11 @@ function waitUntilAllPodsAreReady {
   namespace="$3"
 
   echo "Waiting until all pods in namespace ${namespace} are Running/Succeeded/Completed."
-  local attemps=0
+  local attempts=0
   local successful=false
-  while [ ${attemps} -lt 200 ]
+  while [ ${attempts} -lt 200 ]
   do
-    attemps=$((attemps+1))
+    attempts=$((attempts+1))
     set +e
     pods=$(
       kubectl \
@@ -61,7 +61,7 @@ function waitUntilAllPodsAreReady {
       break
     fi
 
-    echo "Uneady pods: $unreadyPods"
+    echo "Unready pods: $unreadyPods"
     echo "Sleeping 10 seconds before checking again"
     sleep 10
   done
@@ -74,15 +74,15 @@ function waitUntilAllPodsAreReady {
   fi
 }
 
-function readWerftSecret {
-    local name
-    local key
-    name="$1"
-    key="$2"
-    kubectl \
-        --kubeconfig "${DEV_KUBE_PATH}" \
-        --context "${DEV_KUBE_CONTEXT}" \
-        --namespace werft \
-    get secret "${name}" -o jsonpath="{.data.${key}}" \
-  | base64 -d
+function diff-apply {
+  local context=$1
+  shift
+  local yaml=$1
+  yaml=$(realpath "${yaml}")
+
+  if kubectl --context "${context}" diff -f "${yaml}" > /dev/null; then
+    echo "Skipping ${yaml}, as it produced no diff"
+  else
+    kubectl --context "${context}" apply --server-side --force-conflicts -f "${yaml}"
+  fi
 }

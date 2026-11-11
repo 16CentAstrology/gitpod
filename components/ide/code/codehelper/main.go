@@ -5,9 +5,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -24,6 +24,7 @@ import (
 	"github.com/gitpod-io/gitpod/common-go/util"
 	gitpod "github.com/gitpod-io/gitpod/gitpod-protocol"
 	supervisor "github.com/gitpod-io/gitpod/supervisor/api"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -34,8 +35,10 @@ var (
 )
 
 const (
-	Code                = "/ide/bin/gitpod-code"
-	ProductJsonLocation = "/ide/product.json"
+	Code                     = "/ide/bin/gitpod-code"
+	ProductJsonLocation      = "/ide/product.json"
+	WebWorkbenchMainLocation = "/ide/out/vs/workbench/workbench.web.main.js"
+	ServerMainLocation       = "/ide/out/vs/server/node/server.main.js"
 )
 
 func main() {
@@ -45,10 +48,6 @@ func main() {
 	log.Info("codehelper started")
 	startTime := time.Now()
 
-	if err := replaceOpenVSXUrl(); err != nil {
-		log.WithError(err).Error("failed to replace OpenVSX URL")
-	}
-
 	phaseDone := phaseLogging("ResolveWsInfo")
 	cstate, wsInfo, err := resolveWorkspaceInfo(context.Background())
 	if err != nil || wsInfo == nil {
@@ -57,11 +56,35 @@ func main() {
 	}
 	phaseDone()
 
+	url, err := url.Parse(wsInfo.GitpodHost)
+	if err != nil {
+		log.WithError(err).Errorf("failed to parse GitpodHost %s", wsInfo.GitpodHost)
+		return
+	}
+	domain := url.Hostname()
+
 	// code server args install extension with id
 	args := []string{}
 
 	if enableDebug {
 		args = append(args, "--inspect", "--log=trace")
+	} else {
+		switch log.Log.Logger.GetLevel() {
+		case logrus.PanicLevel:
+			args = append(args, "--log=critical")
+		case logrus.FatalLevel:
+			args = append(args, "--log=critical")
+		case logrus.ErrorLevel:
+			args = append(args, "--log=error")
+		case logrus.WarnLevel:
+			args = append(args, "--log=warn")
+		case logrus.InfoLevel:
+			args = append(args, "--log=info")
+		case logrus.DebugLevel:
+			args = append(args, "--log=debug")
+		case logrus.TraceLevel:
+			args = append(args, "--log=trace")
+		}
 	}
 
 	args = append(args, "--install-builtin-extension", "gitpod.gitpod-theme")
@@ -99,8 +122,9 @@ func main() {
 	args = append(args, os.Args[1:]...)
 	args = append(args, "--do-not-sync")
 	args = append(args, "--start-server")
+	cmdEnv := append(os.Environ(), fmt.Sprintf("GITPOD_CODE_HOST=%s", domain))
 	log.WithField("cost", time.Now().Local().Sub(startTime).Milliseconds()).Info("starting server")
-	if err := syscall.Exec(Code, append([]string{"gitpod-code"}, args...), os.Environ()); err != nil {
+	if err := syscall.Exec(Code, append([]string{"gitpod-code"}, args...), cmdEnv); err != nil {
 		log.WithError(err).Error("install ext and start code server failed")
 	}
 }
@@ -195,23 +219,4 @@ func phaseLogging(phase string) context.CancelFunc {
 		log.WithField("phase", phase).WithField("duration", duration).Info("phase end")
 	}()
 	return cancel
-}
-
-func replaceOpenVSXUrl() error {
-	phase := phaseLogging("ReplaceOpenVSXUrl")
-	defer phase()
-	b, err := os.ReadFile(ProductJsonLocation)
-	if err != nil {
-		return errors.New("failed to read product.json: " + err.Error())
-	}
-	registryUrl := os.Getenv("VSX_REGISTRY_URL")
-	if registryUrl != "" {
-		b = bytes.ReplaceAll(b, []byte("https://open-vsx.org"), []byte(registryUrl))
-	}
-	b = bytes.ReplaceAll(b, []byte("{{extensionsGalleryItemUrl}}"), []byte("https://open-vsx.org/vscode/item"))
-	b = bytes.ReplaceAll(b, []byte("{{trustedDomain}}"), []byte("https://open-vsx.org"))
-	if err := os.WriteFile(ProductJsonLocation, b, 0644); err != nil {
-		return errors.New("failed to write product.json: " + err.Error())
-	}
-	return nil
 }

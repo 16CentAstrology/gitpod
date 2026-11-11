@@ -4,7 +4,7 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { Team } from "@gitpod/gitpod-protocol";
+import { MaintenanceNotification, Team } from "@gitpod/gitpod-protocol";
 import { Entity, Column, PrimaryColumn } from "typeorm";
 import { TypeORM } from "../typeorm";
 
@@ -26,7 +26,9 @@ export class DBTeam implements Team {
     @Column()
     markedDeleted?: boolean;
 
-    // This column triggers the db-sync deletion mechanism. It's not intended for public consumption.
-    @Column()
-    deleted: boolean;
+    @Column({ default: false })
+    maintenanceMode?: boolean;
+
+    @Column("json", { nullable: true })
+    maintenanceNotification?: MaintenanceNotification;
 }

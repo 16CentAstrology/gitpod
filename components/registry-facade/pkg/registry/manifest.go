@@ -12,6 +12,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"golang.org/x/xerrors"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/common-go/tracing"
@@ -43,9 +45,21 @@ func (reg *Registry) handleManifest(ctx context.Context, r *http.Request) http.H
 			respondWithError(w, distv2.ErrorCodeManifestUnknown)
 		})
 	}
+	log.Infof("provider %s will handle request for %s", spname, name)
 	spec, err := sp.GetSpec(ctx, name)
 	if err != nil {
-		log.WithError(err).WithField("specProvName", spname).WithField("name", name).Error("cannot get spec")
+		// treat invalid names from node-labeler as debug, not errors
+		// ref: https://github.com/gitpod-io/gitpod/blob/1a3c4b0bb6f13fe38481d21ddd146747c1a1935f/components/node-labeler/cmd/run.go#L291
+		var isNodeLabeler bool
+		if name == "not-a-valid-image" {
+			isNodeLabeler = true
+		}
+		if isNodeLabeler {
+			log.WithError(err).WithField("specProvName", spname).WithField("name", name).Info("this was node-labeler, we expected no spec")
+		} else {
+			log.WithError(err).WithField("specProvName", spname).WithField("name", name).Error("cannot get spec")
+		}
+
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			respondWithError(w, distv2.ErrorCodeManifestUnknown)
 		})
@@ -83,6 +97,15 @@ func (reg *Registry) handleManifest(ctx context.Context, r *http.Request) http.H
 	return res
 }
 
+// fetcherBackoffParams defines the backoff parameters for blob retrieval.
+// Aiming at ~10 seconds total time for retries
+var fetcherBackoffParams = wait.Backoff{
+	Duration: 1 * time.Second,
+	Factor:   1.2,
+	Jitter:   0.2,
+	Steps:    5,
+}
+
 type manifestHandler struct {
 	Context context.Context
 
@@ -101,7 +124,7 @@ func (mh *manifestHandler) getManifest(w http.ResponseWriter, r *http.Request) {
 	span, ctx := opentracing.StartSpanFromContext(r.Context(), "getManifest")
 	logFields := log.OWI("", "", mh.Name)
 	logFields["tag"] = mh.Tag
-	logFields["spec"] = mh.Spec
+	logFields["spec"] = log.TrustedValueWrap{Value: mh.Spec}
 	err := func() error {
 		log.WithFields(logFields).Debug("get manifest")
 		tracing.LogMessageSafe(span, "spec", mh.Spec)
@@ -173,6 +196,11 @@ func (mh *manifestHandler) getManifest(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 
+			originImageSize := 0
+			for _, layer := range manifest.Layers {
+				originImageSize += int(layer.Size)
+			}
+
 			// modify config
 			addonLayer, err := mh.ConfigModifier(ctx, mh.Spec, cfg)
 			if err != nil {
@@ -180,6 +208,11 @@ func (mh *manifestHandler) getManifest(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			manifest.Layers = append(manifest.Layers, addonLayer...)
+			if manifest.Annotations == nil {
+				manifest.Annotations = make(map[string]string)
+			}
+			manifest.Annotations["io.gitpod.workspace-image.size"] = strconv.Itoa(originImageSize)
+			manifest.Annotations["io.gitpod.workspace-image.ref"] = mh.Spec.BaseRef
 
 			// place config in store
 			rawCfg, err := json.Marshal(cfg)
@@ -242,7 +275,7 @@ func (mh *manifestHandler) getManifest(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if err != nil {
-		log.WithError(err).WithField("spec", mh.Spec).Error("cannot get manifest")
+		log.WithError(err).WithField("spec", log.TrustedValueWrap{Value: mh.Spec}).Error("cannot get manifest")
 		respondWithError(w, err)
 	}
 	tracing.FinishSpan(span, &err)
@@ -255,39 +288,54 @@ func DownloadConfig(ctx context.Context, fetch FetcherFunc, ref string, desc oci
 
 		return nil, xerrors.Errorf("unsupported media type: %s", desc.MediaType)
 	}
+	log := log.WithField("desc", desc)
 
 	var opts manifestDownloadOptions
 	for _, o := range options {
 		o(&opts)
 	}
 
-	var rc io.ReadCloser
-	if opts.Store != nil {
-		r, err := opts.Store.ReaderAt(ctx, desc)
-		if errors.Is(err, errdefs.ErrNotFound) {
-			// not cached yet
-		} else if err != nil {
-			log.WithError(err).WithField("desc", desc).Warn("cannot read config from store - fetching again")
-		} else {
-			defer r.Close()
-			rc = io.NopCloser(content.NewReader(r))
+	var buf []byte
+	err = wait.ExponentialBackoffWithContext(ctx, fetcherBackoffParams, func(ctx context.Context) (done bool, err error) {
+		var rc io.ReadCloser
+		if opts.Store != nil {
+			r, err := opts.Store.ReaderAt(ctx, desc)
+			if errors.Is(err, errdefs.ErrNotFound) {
+				// not cached yet
+			} else if err != nil {
+				log.WithError(err).Warn("cannot read config from store - fetching again")
+			} else {
+				defer r.Close()
+				rc = io.NopCloser(content.NewReader(r))
+			}
 		}
-	}
-	if rc == nil {
-		fetcher, err := fetch()
-		if err != nil {
-			return nil, err
+		if rc == nil {
+			fetcher, err := fetch()
+			if err != nil {
+				log.WithError(err).Warn("cannot create fetcher")
+				return false, nil // retry
+			}
+			rc, err = fetcher.Fetch(ctx, desc)
+			if err != nil {
+				log.WithError(err).Warn("cannot fetch config")
+				if retryableError(err) {
+					return false, nil // retry
+				}
+				return false, err
+			}
+			defer rc.Close()
 		}
-		rc, err = fetcher.Fetch(ctx, desc)
-		if err != nil {
-			return nil, xerrors.Errorf("cannot download config: %w", err)
-		}
-		defer rc.Close()
-	}
 
-	buf, err := io.ReadAll(rc)
+		buf, err = io.ReadAll(rc)
+		if err != nil {
+			log.WithError(err).Warn("cannot read config")
+			return false, nil // retry
+		}
+
+		return true, nil
+	})
 	if err != nil {
-		return nil, xerrors.Errorf("cannot read config: %w", err)
+		return nil, xerrors.Errorf("failed to fetch config: %w", err)
 	}
 
 	var res ociv1.Image
@@ -364,6 +412,8 @@ func AsFetcherFunc(f remotes.Fetcher) FetcherFunc {
 // DownloadManifest downloads and unmarshals the manifest of the given desc. If the desc points to manifest list
 // we choose the first manifest in that list.
 func DownloadManifest(ctx context.Context, fetch FetcherFunc, desc ociv1.Descriptor, options ...ManifestDownloadOption) (cfg *ociv1.Manifest, rdesc *ociv1.Descriptor, err error) {
+	log := log.WithField("desc", desc)
+
 	var opts manifestDownloadOptions
 	for _, o := range options {
 		o(&opts)
@@ -371,61 +421,74 @@ func DownloadManifest(ctx context.Context, fetch FetcherFunc, desc ociv1.Descrip
 
 	var (
 		placeInStore bool
-		rc           io.ReadCloser
 		mediaType    = desc.MediaType
+		inpt         []byte
 	)
-	if opts.Store != nil {
-		func() {
-			nfo, err := opts.Store.Info(ctx, desc.Digest)
-			if errors.Is(err, errdefs.ErrNotFound) {
-				// not in store yet
-				return
-			}
+	err = wait.ExponentialBackoffWithContext(ctx, fetcherBackoffParams, func(ctx context.Context) (done bool, err error) {
+		var rc io.ReadCloser
+		if opts.Store != nil {
+			func() {
+				nfo, err := opts.Store.Info(ctx, desc.Digest)
+				if errors.Is(err, errdefs.ErrNotFound) {
+					// not in store yet
+					return
+				}
+				if err != nil {
+					log.WithError(err).Warn("cannot get manifest from store")
+					return
+				}
+				if nfo.Labels["Content-Type"] == "" {
+					// we have broken data in the store - ignore it and overwrite
+					return
+				}
+
+				r, err := opts.Store.ReaderAt(ctx, desc)
+				if errors.Is(err, errdefs.ErrNotFound) {
+					// not in store yet
+					return
+				}
+				if err != nil {
+					log.WithError(err).Warn("cannot get manifest from store")
+					return
+				}
+
+				mediaType, rc = nfo.Labels["Content-Type"], &reader{ReaderAt: r}
+			}()
+		}
+		if rc == nil {
+			// did not find in store, or there was no store. Either way, let's fetch this
+			// thing from the remote.
+			placeInStore = true
+
+			var fetcher remotes.Fetcher
+			fetcher, err = fetch()
 			if err != nil {
-				log.WithError(err).WithField("desc", desc).Warn("cannot get manifest from store")
-				return
-			}
-			if nfo.Labels["Content-Type"] == "" {
-				// we have broken data in the store - ignore it and overwrite
-				return
+				log.WithError(err).Warn("cannot create fetcher")
+				return false, nil // retry
 			}
 
-			r, err := opts.Store.ReaderAt(ctx, desc)
-			if errors.Is(err, errdefs.ErrNotFound) {
-				// not in store yet
-				return
-			}
+			rc, err = fetcher.Fetch(ctx, desc)
 			if err != nil {
-				log.WithError(err).WithField("desc", desc).Warn("cannot get manifest from store")
-				return
+				log.WithError(err).Warn("cannot fetch manifest")
+				if retryableError(err) {
+					return false, nil // retry
+				}
+				return false, err
 			}
-
-			mediaType, rc = nfo.Labels["Content-Type"], &reader{ReaderAt: r}
-		}()
-	}
-	if rc == nil {
-		// did not find in store, or there was no store. Either way, let's fetch this
-		// thing from the remote.
-		placeInStore = true
-
-		var fetcher remotes.Fetcher
-		fetcher, err = fetch()
-		if err != nil {
-			return
+			mediaType = desc.MediaType
 		}
 
-		rc, err = fetcher.Fetch(ctx, desc)
+		inpt, err = io.ReadAll(rc)
+		rc.Close()
 		if err != nil {
-			err = xerrors.Errorf("cannot fetch manifest: %w", err)
-			return
+			log.WithError(err).Warn("cannot read manifest")
+			return false, nil // retry
 		}
-		mediaType = desc.MediaType
-	}
 
-	inpt, err := io.ReadAll(rc)
-	rc.Close()
+		return true, nil
+	})
 	if err != nil {
-		err = xerrors.Errorf("cannot download manifest: %w", err)
+		err = xerrors.Errorf("failed to fetch manifest: %w", err)
 		return
 	}
 
@@ -434,7 +497,8 @@ func DownloadManifest(ctx context.Context, fetch FetcherFunc, desc ociv1.Descrip
 
 	switch rdesc.MediaType {
 	case images.MediaTypeDockerSchema2ManifestList, ociv1.MediaTypeImageIndex:
-		log.WithField("desc", rdesc).Debug("resolving image index")
+		log := log.WithField("desc", rdesc)
+		log.Debug("resolving image index")
 
 		// we received a manifest list which means we'll pick the default platform
 		// and fetch that manifest
@@ -449,24 +513,37 @@ func DownloadManifest(ctx context.Context, fetch FetcherFunc, desc ociv1.Descrip
 			return
 		}
 
-		var fetcher remotes.Fetcher
-		fetcher, err = fetch()
-		if err != nil {
-			return
-		}
+		err = wait.ExponentialBackoffWithContext(ctx, fetcherBackoffParams, func(ctx context.Context) (done bool, err error) {
+			var fetcher remotes.Fetcher
+			fetcher, err = fetch()
+			if err != nil {
+				log.WithError(err).Warn("cannot create fetcher")
+				return false, nil // retry
+			}
 
-		// TODO(cw): choose by platform, not just the first manifest
-		md := list.Manifests[0]
-		rc, err = fetcher.Fetch(ctx, md)
+			// TODO(cw): choose by platform, not just the first manifest
+			var rc io.ReadCloser
+			md := list.Manifests[0]
+			rc, err = fetcher.Fetch(ctx, md)
+			if err != nil {
+				log.WithError(err).Warn("cannot download config")
+				if retryableError(err) {
+					return false, nil // retry
+				}
+				return false, err
+			}
+			rdesc = &md
+			inpt, err = io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				log.WithError(err).Warn("cannot download manifest")
+				return false, nil // retry
+			}
+
+			return true, nil
+		})
 		if err != nil {
-			err = xerrors.Errorf("cannot download config: %w", err)
-			return
-		}
-		rdesc = &md
-		inpt, err = io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			err = xerrors.Errorf("cannot download manifest: %w", err)
+			err = xerrors.Errorf("failed to download config: %w", err)
 			return
 		}
 	}
@@ -518,4 +595,20 @@ func (mh *manifestHandler) putManifest(w http.ResponseWriter, r *http.Request) {
 
 func (mh *manifestHandler) deleteManifest(w http.ResponseWriter, r *http.Request) {
 	respondWithError(w, distv2.ErrorCodeManifestUnknown)
+}
+
+func retryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errdefs.ErrNotFound) || errors.Is(err, errdefs.ErrInvalidArgument) {
+		return false
+	}
+	if strings.Contains(err.Error(), "not found") ||
+		strings.Contains(err.Error(), "invalid argument") ||
+		strings.Contains(err.Error(), "not implemented") ||
+		strings.Contains(err.Error(), "unsupported media type") {
+		return false
+	}
+	return true
 }

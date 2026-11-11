@@ -4,7 +4,7 @@
  * See License.AGPL.txt in the project root for license information.
  */
 
-import { BlockedRepository } from "@gitpod/gitpod-protocol/src/blocked-repositories-protocol";
+import { BlockedRepository } from "@gitpod/gitpod-protocol/lib/blocked-repositories-protocol";
 import { Entity, Column, PrimaryGeneratedColumn } from "typeorm";
 import { Transformer } from "../transformer";
 
@@ -18,6 +18,9 @@ export class DBBlockedRepository implements BlockedRepository {
 
     @Column()
     blockUser: boolean;
+
+    @Column()
+    blockFreeUsage: boolean;
 
     @Column({
         type: "timestamp",
@@ -35,7 +38,7 @@ export class DBBlockedRepository implements BlockedRepository {
     })
     updatedAt: string;
 
-    // This column triggers the db-sync deletion mechanism. It's not intended for public consumption.
+    // This column triggers the periodic deleter deletion mechanism. It's not intended for public consumption.
     @Column()
     deleted: boolean;
 }

@@ -38,6 +38,8 @@ const (
 	ProcessCodeServer ProcessType = "vscode-server"
 	// ProcessCodeServerHelper refers to VS Code Desktop child process
 	ProcessCodeServerHelper ProcessType = "vscode-server-helper"
+	// ProcessJetBrainsIDE refers to JetBrains IDE process
+	ProcessJetBrainsIDE ProcessType = "jetbrains-ide"
 	// ProcessDefault referes to any process that is not one of the above
 	ProcessDefault ProcessType = "default"
 
@@ -78,7 +80,7 @@ func (c *ProcessPriorityV2) Apply(ctx context.Context, opts *PluginOptions) erro
 			// the target cgroup/workspace has gone
 			return nil
 		} else if err != nil {
-			log.WithField("path", fullCgroupPath).WithError(err).Errorf("cannot read cgroup.procs file")
+			log.WithFields(log.OWI("", "", opts.InstanceId)).WithField("path", fullCgroupPath).WithError(err).Errorf("cannot read cgroup.procs file")
 			return err
 		}
 
@@ -92,7 +94,7 @@ func (c *ProcessPriorityV2) Apply(ctx context.Context, opts *PluginOptions) erro
 
 			pid, err := strconv.ParseInt(line, 10, 64)
 			if err != nil {
-				log.WithError(err).WithField("line", line).Warn("cannot parse pid")
+				log.WithError(err).WithFields(log.OWI("", "", opts.InstanceId)).WithField("line", line).Warn("cannot parse pid")
 				continue
 			}
 
@@ -102,7 +104,7 @@ func (c *ProcessPriorityV2) Apply(ctx context.Context, opts *PluginOptions) erro
 					continue
 				}
 
-				log.WithError(err).WithField("pid", pid).Warn("cannot get process")
+				log.WithError(err).WithFields(log.OWI("", "", opts.InstanceId)).WithField("pid", pid).Warn("cannot get process")
 				continue
 			}
 
@@ -125,6 +127,7 @@ func (c *ProcessPriorityV2) Apply(ctx context.Context, opts *PluginOptions) erro
 
 var (
 	vsCodeNodeRegex = regexp.MustCompile("/home/gitpod/.vscode-server/bin/.*/node")
+	jetBrainsRegex  = regexp.MustCompile("/ide-desktop/.*/backend/plugins/remote-dev-server/selfcontained/lib")
 )
 
 func determineProcessType(p *process.Process) ProcessType {
@@ -155,6 +158,10 @@ func determineProcessType(p *process.Process) ProcessType {
 
 	if strings.HasSuffix(cmd[0], "/ide/node") {
 		return ProcessWebIDEHelper
+	}
+
+	if jetBrainsRegex.MatchString(strings.Join(cmd, " ")) {
+		return ProcessJetBrainsIDE
 	}
 
 	return ProcessDefault

@@ -2,10 +2,10 @@
 # Licensed under the GNU Affero General Public License (AGPL).
 # See License.AGPL.txt in the project root for license information.
 
-FROM alpine:3.16
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:94fa13e26d449f7d78dbcd02d12ea37a0da80d24fcc3e1f17b95d515dec607a7
 
 # Ensure latest packages are present, like security updates.
-RUN  apk upgrade --no-cache \
+RUN apk upgrade --no-cache \
   && apk add --no-cache git bash ca-certificates
 
 COPY components-image-builder-mk3--app/image-builder /app/

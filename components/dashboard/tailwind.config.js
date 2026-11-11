@@ -7,30 +7,79 @@
 // tailwind.config.js
 const colors = require("tailwindcss/colors");
 
+// TODO: Can replace these w/ rgb(var(...)) references so colors are only defined in our main CSS file
+const podkitColors = {
+    black: "#161616",
+    white: "#FFFFFF",
+    gray: {
+        900: "#12100C",
+        850: "#151310",
+        800: "#23211E",
+        750: "#2C2B28",
+        700: "#514F4D",
+        600: "#565451",
+        500: "#666564",
+        450: "#999795",
+        400: "#747372",
+        300: "#DADADA",
+        200: "#ECE7E5",
+        100: "#F5F4F4",
+        50: "#F9F9F9",
+    },
+};
+
 module.exports = {
     jit: true,
-    purge: ["./public/**/*.html", "./src/**/*.{js,ts,tsx}"],
+    content: ["./public/**/*.html", "./src/**/*.{js,ts,tsx}"],
     important: true,
     darkMode: "class",
     theme: {
         extend: {
             colors: {
-                gray: colors.warmGray,
                 green: colors.lime,
                 orange: colors.amber,
-                blue: {
-                    light: "#75A9EC",
-                    DEFAULT: "#5C8DD6",
-                    dark: "#265583",
-                },
-                "gitpod-black": "#161616",
-                "gitpod-gray": "#8E8787",
+                // TODO: figure out if we want to just pull in the specific gitpod-* colors
+                teal: colors.teal,
+                sky: colors.sky,
+                rose: colors.rose,
+                "gitpod-black": podkitColors.black,
                 "gitpod-red": "#CE4A3E",
-                "gitpod-kumquat-light": "#FFE4BC",
-                "gitpod-kumquat": "#FFB45B",
-                "gitpod-kumquat-dark": "#FF8A00",
-                "gitpod-kumquat-darker": "#f28300",
-                "gitpod-kumquat-gradient": "linear-gradient(137.41deg, #FFAD33 14.37%, #FF8A00 91.32%)",
+                "kumquat-dark": "#FF8A00",
+                "kumquat-base": "#FFAE33",
+                "kumquat-ripe": "#FFB45B",
+                "kumquat-light": "#FFE4BC",
+                gray: podkitColors.gray,
+                // Podkit colors - eventually we'll only use these colors
+                // Once migrated, we can remove the colors above and shift this up under theme directly instead of extend
+                "pk-content": {
+                    primary: "rgb(var(--content-primary) / <alpha-value>)",
+                    secondary: "rgb(var(--content-secondary) / <alpha-value>)",
+                    tertiary: "rgb(var(--content-tertiary) / <alpha-value>)",
+                    disabled: "rgb(var(--content-disabled) / <alpha-value>)",
+                    "invert-primary": "rgb(var(--content-invert-primary) / <alpha-value>)",
+                    "invert-secondary": "rgb(var(--content-invert-secondary) / <alpha-value>)",
+                    danger: "rgb(var(--content-danger) / <alpha-value>)",
+                },
+                "pk-surface": {
+                    primary: "rgb(var(--surface-primary) / <alpha-value>)",
+                    secondary: "rgb(var(--surface-secondary) / <alpha-value>)",
+                    tertiary: "rgb(var(--surface-tertiary) / <alpha-value>)",
+                    labels: "rgb(var(--surface-labels) / <alpha-value>)",
+                    invert: "rgb(var(--surface-invert) / <alpha-value>)",
+                    "01": "rgb(var(--surface-01) / <alpha-value>)",
+                },
+                "pk-border": {
+                    light: "rgb(var(--border-light) / <alpha-value>)",
+                    base: "rgb(var(--border-base) / <alpha-value>)",
+                    strong: "rgb(var(--border-strong) / <alpha-value>)",
+                    invert: "rgb(var(--border-invert) / <alpha-value>)",
+                },
+            },
+            boxShadow: {
+                engraving: "inset 0px 1px 1px rgba(0, 0, 0, 0.1)",
+            },
+            backgroundImage: {
+                "kumquat-gradient": "linear-gradient(137.41deg, #FFAD33 14.37%, #FF8A00 91.32%)",
             },
             container: {
                 center: true,
@@ -42,9 +91,40 @@ module.exports = {
                 112: "28rem",
                 128: "32rem",
             },
-            maxWidth: {
-                // TODO(andreafalzetti): remove custom ide-modal class once we implement https://github.com/gitpod-io/gitpod/issues/13116
-                51.5: "51.5rem",
+            height: {
+                112: "28rem",
+            },
+            lineHeight: {
+                64: "64px",
+            },
+            keyframes: {
+                "toast-in-right": {
+                    from: { transform: "translateX(100%)" },
+                    to: { transform: "translateX(0)" },
+                },
+                "fade-in": {
+                    "0%": { opacity: "0" },
+                    "100%": { opacity: "1" },
+                },
+                "accordion-down": {
+                    from: { height: "0" },
+                    to: { height: "var(--radix-accordion-content-height)" },
+                  },
+                "accordion-up": {
+                    from: { height: "var(--radix-accordion-content-height)" },
+                    to: { height: "0" },
+                },
+            },
+            animation: {
+                "toast-in-right": "toast-in-right 0.3s ease-in-out",
+                "fade-in": "fade-in 3s linear",
+                "fade-in-fast": "fade-in .3s ease-in-out",
+                "spin-slow": "spin 2s linear infinite",
+                "accordion-down": "accordion-down 0.2s ease-out",
+                "accordion-up": "accordion-up 0.2s ease-out",
+            },
+            transitionProperty: {
+                width: "width",
             },
         },
         fontFamily: {
@@ -64,7 +144,16 @@ module.exports = {
                 "Segoe UI Symbol",
                 "Noto Color Emoji",
             ],
-            mono: ["SF Mono", "Monaco", "Inconsolata", "Fira Mono", "Droid Sans Mono", "Source Code Pro", "monospace"],
+            mono: [
+                "JetBrains Mono",
+                "SF Mono",
+                "Monaco",
+                "Inconsolata",
+                "Fira Mono",
+                "Droid Sans Mono",
+                "Source Code Pro",
+                "monospace",
+            ],
         },
         underlineThickness: {
             thin: "2px",
@@ -93,6 +182,7 @@ module.exports = {
         require("@tailwindcss/forms"),
         require("tailwind-underline-utils"),
         require("tailwindcss-filters"),
+        require("tailwindcss-animate"),
         // ...
     ],
 };

@@ -22,8 +22,11 @@ import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { UnauthorizedError } from "../errors";
 import { RepoURL } from "../repohost";
 import { HostContextProvider } from "./host-context-provider";
+import { reportGuardAccessCheck } from "../prometheus-metrics";
+import { FunctionAccessGuard } from "./function-access";
+import { getRequiredScopes } from "@gitpod/public-api-common/lib/auth-providers";
 
-declare var resourceInstance: GuardedResource;
+declare let resourceInstance: GuardedResource;
 export type GuardedResourceKind = typeof resourceInstance.kind;
 
 export type GuardedResource =
@@ -37,7 +40,6 @@ export type GuardedResource =
     | GuardedContentBlob
     | GuardEnvVar
     | GuardedTeam
-    | GuardedCostCenter
     | GuardedWorkspaceLog
     | GuardedPrebuild;
 
@@ -52,7 +54,6 @@ const ALL_GUARDED_RESOURCE_KINDS = new Set<GuardedResourceKind>([
     "contentBlob",
     "envVar",
     "team",
-    "costCenter",
     "workspaceLog",
 ]);
 export function isGuardedResourceKind(kind: any): kind is GuardedResourceKind {
@@ -106,24 +107,6 @@ export interface GuardedTeam {
     members: TeamMemberInfo[];
 }
 
-export interface GuardedCostCenter {
-    kind: "costCenter";
-    //subject: CostCenter;
-    owner: CostCenterOwner;
-    // team: Team;
-    // members: TeamMemberInfo[];
-}
-type CostCenterOwner =
-    | {
-          kind: "user";
-          userId: string;
-      }
-    | {
-          kind: "team";
-          team: Team;
-          members: TeamMemberInfo[];
-      };
-
 export interface GuardedGitpodToken {
     kind: "gitpodToken";
     subject: GitpodToken;
@@ -172,6 +155,42 @@ export class CompositeResourceAccessGuard implements ResourceAccessGuard {
     }
 }
 
+/**
+ * FGAResourceAccessGuard can disable the delegate if FGA is enabled.
+ */
+export class FGAResourceAccessGuard implements ResourceAccessGuard {
+    constructor(
+        //@ts-ignore
+        private readonly userId: string,
+        //@ts-ignore
+        private readonly delegate: ResourceAccessGuard,
+    ) {}
+
+    async canAccess(resource: GuardedResource, operation: ResourceAccessOp): Promise<boolean> {
+        // Authorizer takes over, so we should not check.
+        reportGuardAccessCheck("fga");
+        return true;
+    }
+}
+
+/**
+ * FGAFunctionAccessGuard can disable the delegate if FGA is enabled.
+ */
+export class FGAFunctionAccessGuard {
+    constructor(
+        //@ts-ignore
+        private readonly userId: string,
+        //@ts-ignore
+        private readonly delegate: FunctionAccessGuard,
+    ) {}
+
+    async canAccess(name: string): Promise<boolean> {
+        // Authorizer takes over, so we should not check.
+        reportGuardAccessCheck("fga");
+        return true;
+    }
+}
+
 export class TeamMemberResourceGuard implements ResourceAccessGuard {
     constructor(readonly userId: string) {}
 
@@ -185,15 +204,6 @@ export class TeamMemberResourceGuard implements ResourceAccessGuard {
                 return await this.hasAccessToWorkspace(resource.subject, resource.teamMembers);
             case "prebuild":
                 return !!resource.teamMembers?.some((m) => m.userId === this.userId);
-            case "costCenter":
-                const owner = resource.owner;
-                if (owner.kind === "user") {
-                    // This is handled in the "OwnerResourceGuard"
-                    return false;
-                }
-                // TODO(gpl) We should check whether we're looking at the right team for the right CostCenter here!
-                // Only team "owners" are allowed to do anything with CostCenters
-                return owner.members.filter((m) => m.role === "owner").some((m) => m.userId === this.userId);
         }
         return false;
     }
@@ -219,7 +229,7 @@ export class OwnerResourceGuard implements ResourceAccessGuard {
             case "contentBlob":
                 return resource.userID === this.userId;
             case "gitpodToken":
-                return resource.subject.user.id === this.userId;
+                return resource.subject.userId === this.userId;
             case "snapshot":
                 return resource.workspace.ownerId === this.userId;
             case "token":
@@ -237,23 +247,20 @@ export class OwnerResourceGuard implements ResourceAccessGuard {
             case "team":
                 switch (operation) {
                     case "create":
-                        // Anyone can create a new team.
-                        return true;
+                        // Anyone who's not owned by an org can create orgs.
+                        return !resource.members.some((m) => m.userId === this.userId && m.ownedByOrganization);
                     case "get":
                         // Only members can get infos about a team.
                         return resource.members.some((m) => m.userId === this.userId);
                     case "update":
-                    case "delete":
-                        // Only owners can update or delete a team.
+                        // Only owners can update a team.
                         return resource.members.some((m) => m.userId === this.userId && m.role === "owner");
+                    case "delete":
+                        // Only owners that are not directly owned by the org can delete the org.
+                        return resource.members.some(
+                            (m) => m.userId === this.userId && m.role === "owner" && !m.ownedByOrganization,
+                        );
                 }
-            case "costCenter":
-                const owner = resource.owner;
-                if (owner.kind === "team") {
-                    // This is handled in the "TeamMemberResourceGuard"
-                    return false;
-                }
-                return owner.userId === this.userId;
             case "workspaceLog":
                 return resource.subject.ownerId === this.userId;
             case "prebuild":
@@ -307,15 +314,22 @@ export class ScopedResourceGuard<K extends GuardedResourceKind = GuardedResource
 }
 
 export class WorkspaceEnvVarAccessGuard extends ScopedResourceGuard<"envVar"> {
-    private readAccessWildcardPatterns: Set<string> | undefined;
+    private _envVarScopes: string[];
+    protected get envVarScopes() {
+        return (this._envVarScopes = this._envVarScopes || []);
+    }
 
     async canAccess(resource: GuardedResource, operation: ResourceAccessOp): Promise<boolean> {
         if (resource.kind !== "envVar") {
             return false;
         }
         // allow read access based on wildcard repo patterns matching
-        if (operation === "get" && this.readAccessWildcardPatterns?.has(resource.subject.repositoryPattern)) {
-            return true;
+        if (operation === "get") {
+            for (const scope of this.envVarScopes) {
+                if (UserEnvVar.matchEnvVarPattern(resource.subject.repositoryPattern, scope)) {
+                    return true;
+                }
+            }
         }
         // but mutations only based on exact matching
         return super.canAccess(resource, operation);
@@ -326,11 +340,7 @@ export class WorkspaceEnvVarAccessGuard extends ScopedResourceGuard<"envVar"> {
         if (!scope.operations.includes("get")) {
             return;
         }
-        const [owner, repo] = UserEnvVar.splitRepositoryPattern(scope.subjectID);
-        this.readAccessWildcardPatterns = this.readAccessWildcardPatterns || new Set<string>();
-        this.readAccessWildcardPatterns.add("*/*");
-        this.readAccessWildcardPatterns.add(`${owner}/*`);
-        this.readAccessWildcardPatterns.add(`*/${repo}`);
+        this.envVarScopes.push(scope.subjectID); // the repository that this scope allows access to
     }
 }
 
@@ -574,11 +584,16 @@ export class RepositoryResourceGuard implements ResourceAccessGuard {
                 const { authProvider } = hostContext;
                 const identity = User.getIdentity(this.user, authProvider.authProviderId);
                 if (!identity) {
-                    throw UnauthorizedError.create(
-                        repoUrl!.host,
-                        authProvider.info.requirements?.default || [],
-                        "missing-identity",
-                    );
+                    const providerType = authProvider.info.authProviderType;
+                    const requiredScopes = getRequiredScopes(providerType)?.default;
+                    throw UnauthorizedError.create({
+                        host: repoUrl.host,
+                        repoName: repoUrl.repo,
+                        providerType,
+                        requiredScopes,
+                        providerIsConnected: false,
+                        isMissingScopes: true,
+                    });
                 }
                 const { services } = hostContext;
                 if (!services) {

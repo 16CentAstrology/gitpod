@@ -5,7 +5,6 @@
  */
 
 import {
-    AdditionalUserData,
     GitpodToken,
     GitpodTokenType,
     Identity,
@@ -15,24 +14,23 @@ import {
     TokenEntry,
     User,
     UserEnvVar,
+    UserEnvVarValue,
     UserSSHPublicKey,
 } from "@gitpod/gitpod-protocol";
 import { OAuthTokenRepository, OAuthUserRepository } from "@jmondi/oauth2-server";
 import { Repository } from "typeorm";
 import { DBUser } from "./typeorm/entity/db-user";
+import { TransactionalDB } from "./typeorm/transactional-db-impl";
 
 export type MaybeUser = User | undefined;
 
 export const UserDB = Symbol("UserDB");
-export interface UserDB extends OAuthUserRepository, OAuthTokenRepository {
-    transaction<T>(code: (db: UserDB) => Promise<T>): Promise<T>;
-
+export interface UserDB extends OAuthUserRepository, OAuthTokenRepository, TransactionalDB<UserDB> {
     newUser(): Promise<User>;
     storeUser(newUser: User): Promise<User>;
     updateUserPartial(partial: PartialUserUpdate): Promise<void>;
     findUserById(id: string): Promise<MaybeUser>;
     findUserByIdentity(identity: IdentityLookup): Promise<MaybeUser>;
-    findIdentitiesByName(identity: Pick<Identity, "authProviderId" | "authName">): Promise<Identity[]>;
 
     /**
      * Gets the number of users.
@@ -99,7 +97,7 @@ export interface UserDB extends OAuthUserRepository, OAuthTokenRepository {
      * @param identity
      * @throws an error when there is more than one token
      */
-    findTokenForIdentity(identity: Identity): Promise<Token | undefined>;
+    findTokenEntryForIdentity(identity: Identity): Promise<TokenEntry | undefined>;
 
     /**
      *
@@ -115,7 +113,9 @@ export interface UserDB extends OAuthUserRepository, OAuthTokenRepository {
      */
     findUsersByEmail(email: string): Promise<User[]>;
 
-    setEnvVar(envVar: UserEnvVar): Promise<void>;
+    findEnvVar(userId: string, envVar: UserEnvVarValue): Promise<UserEnvVar | undefined>;
+    addEnvVar(userId: string, envVar: UserEnvVarValue): Promise<UserEnvVar>;
+    updateEnvVar(userId: string, envVar: Partial<UserEnvVarValue>): Promise<UserEnvVar | undefined>;
     deleteEnvVar(envVar: UserEnvVar): Promise<void>;
     getEnvVars(userId: string): Promise<UserEnvVar[]>;
 
@@ -143,11 +143,15 @@ export interface UserDB extends OAuthUserRepository, OAuthTokenRepository {
     ): Promise<{ user: User; token: GitpodToken } | undefined>;
     findGitpodTokensOfUser(userId: string, tokenHash: string): Promise<GitpodToken | undefined>;
     findAllGitpodTokensOfUser(userId: string): Promise<GitpodToken[]>;
-    storeGitpodToken(token: GitpodToken & { user: DBUser }): Promise<void>;
+    storeGitpodToken(token: GitpodToken): Promise<void>;
     deleteGitpodToken(tokenHash: string): Promise<void>;
     deleteGitpodTokensNamedLike(userId: string, namePattern: string): Promise<void>;
     countUsagesOfPhoneNumber(phoneNumber: string): Promise<number>;
     isBlockedPhoneNumber(phoneNumber: string): Promise<boolean>;
+
+    findOrgOwnedUser(organizationId: string, email: string): Promise<MaybeUser>;
+
+    findUserIdsNotYetMigratedToFgaVersion(fgaRelationshipsVersion: number, limit: number): Promise<string[]>;
 }
 export type PartialUserUpdate = Partial<Omit<User, "identities">> & Pick<User, "id">;
 
@@ -155,11 +159,13 @@ export const BUILTIN_WORKSPACE_PROBE_USER_ID = "builtin-user-workspace-probe-000
 
 export const BUILTIN_WORKSPACE_USER_AGENT_SMITH = "builtin-user-agent-smith-0000000";
 
-export interface OwnerAndRepo {
-    owner: string;
-    repo: string;
-}
+// We need a valid UUID for the builtin admin user so that it can authenticate in order to call endpoints for setting up SSO
+export const BUILTIN_INSTLLATION_ADMIN_USER_ID = "f071bb8e-b5d1-46cf-a436-da03ae63bcd2";
 
-export type UserEmailContact = Pick<User, "id" | "name"> & { primaryEmail: string } & {
-    additionalData?: Pick<AdditionalUserData, "emailNotificationSettings">;
-};
+export function isBuiltinUser(userId: string): boolean {
+    return [
+        BUILTIN_WORKSPACE_PROBE_USER_ID,
+        BUILTIN_WORKSPACE_USER_AGENT_SMITH,
+        BUILTIN_INSTLLATION_ADMIN_USER_ID,
+    ].some((id) => id === userId);
+}

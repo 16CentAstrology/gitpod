@@ -8,8 +8,8 @@ import { injectable, inject } from "inversify";
 import { AuthProviderParams } from "../auth/auth-provider";
 import { User, Token } from "@gitpod/gitpod-protocol";
 import { UnauthorizedError } from "../errors";
-import { GitHubScope } from "./scopes";
 import { TokenProvider } from "../user/token-provider";
+import { GitHubOAuthScopes } from "@gitpod/public-api-common/lib/auth-providers";
 
 @injectable()
 export class GitHubTokenHelper {
@@ -30,22 +30,28 @@ export class GitHubTokenHelper {
         const { host } = this.config;
         try {
             const token = await this.tokenProvider.getTokenForHost(user, host);
-            if (this.containsScopes(token, requiredScopes)) {
+            if (token && this.containsScopes(token, requiredScopes)) {
                 return token;
             }
         } catch {
             // no token
         }
         if (requiredScopes.length === 0) {
-            requiredScopes = GitHubScope.Requirements.DEFAULT;
+            requiredScopes = GitHubOAuthScopes.Requirements.DEFAULT;
         }
-        throw UnauthorizedError.create(host, requiredScopes, "missing-identity");
+        throw UnauthorizedError.create({
+            host,
+            providerType: "GitHub",
+            requiredScopes: GitHubOAuthScopes.Requirements.DEFAULT,
+            providerIsConnected: false,
+            isMissingScopes: true,
+        });
     }
     protected containsScopes(token: Token, wantedScopes: string[] | undefined): boolean {
         const wantedSet = new Set(wantedScopes);
         const currentScopes = [...token.scopes];
-        if (currentScopes.some((s) => s === GitHubScope.PRIVATE)) {
-            currentScopes.push(GitHubScope.PUBLIC); // normalize private_repo, which includes public_repo
+        if (currentScopes.some((s) => s === GitHubOAuthScopes.PRIVATE)) {
+            currentScopes.push(GitHubOAuthScopes.PUBLIC); // normalize private_repo, which includes public_repo
         }
         currentScopes.forEach((s) => wantedSet.delete(s));
         return wantedSet.size === 0;

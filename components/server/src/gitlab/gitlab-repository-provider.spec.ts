@@ -5,10 +5,10 @@
  */
 
 import { User } from "@gitpod/gitpod-protocol";
-import { skipIfEnvVarNotSet } from "@gitpod/gitpod-protocol/lib/util/skip-if";
+import { ifEnvVarNotSet } from "@gitpod/gitpod-protocol/lib/util/skip-if";
 import { expect } from "chai";
 import { Container, ContainerModule } from "inversify";
-import { suite, retries, test, timeout } from "mocha-typescript";
+import { suite, retries, test, timeout, skip } from "@testdeck/mocha";
 import { AuthProviderParams } from "../auth/auth-provider";
 import { HostContextProvider } from "../auth/host-context-provider";
 import { DevData } from "../dev/dev-data";
@@ -18,7 +18,7 @@ import { GitlabContextParser } from "./gitlab-context-parser";
 import { GitlabRepositoryProvider } from "./gitlab-repository-provider";
 import { GitLabTokenHelper } from "./gitlab-token-helper";
 
-@suite(timeout(10000), retries(2), skipIfEnvVarNotSet("GITPOD_TEST_TOKEN_GITLAB"))
+@suite(timeout(10000), retries(2), skip(ifEnvVarNotSet("GITPOD_TEST_TOKEN_GITLAB")))
 class TestGitlabRepositoryProvider {
     static readonly AUTH_HOST_CONFIG: Partial<AuthProviderParams> = {
         id: "Public-GitLab",
@@ -42,8 +42,6 @@ class TestGitlabRepositoryProvider {
                 bind(GitLabTokenHelper).toSelf().inSingletonScope();
                 bind(TokenProvider).toConstantValue(<TokenProvider>{
                     getTokenForHost: async () => DevData.createGitlabTestToken(),
-                    getFreshPortAuthenticationToken: async (user: User, workspaceId: string) =>
-                        DevData.createPortAuthTestToken(workspaceId),
                 });
                 bind(HostContextProvider).toConstantValue(DevData.createDummyHostContextProvider());
                 bind(GitlabRepositoryProvider).toSelf().inSingletonScope();
@@ -65,6 +63,31 @@ class TestGitlabRepositoryProvider {
             "4447fbc4d46e6fd1ee41fb1b992702521ae078eb",
             "f2d9790f2752a794517b949c65a773eb864844cd",
         ]);
+    }
+
+    @test public async testSearchRepos_matchesSubstring() {
+        const result = await this.repositoryProvider.searchRepos(this.user, "est", 100);
+        expect(result.length).to.be.eq(1);
+    }
+
+    // The minimum search string length is 3 characters (unless there is an exact match).
+    @test public async testSearchRepos_shortSearchString_looseMatch() {
+        const resultA = await this.repositoryProvider.searchRepos(this.user, "t", 100);
+        expect(resultA.length).to.be.eq(0);
+
+        const resultB = await this.repositoryProvider.searchRepos(this.user, "te", 100);
+        expect(resultB.length).to.be.eq(0);
+    }
+
+    @test public async testSearchRepos_shortSearchString_exactMatch() {
+        const result = await this.repositoryProvider.searchRepos(this.user, "g", 100);
+        expect(result.length).to.be.eq(1);
+    }
+
+    // GitLab API does not support searching for repositories by their full path, only by their name.
+    @test public async testSearchRepos_noMatchAgainstWholePath() {
+        const result = await this.repositoryProvider.searchRepos(this.user, "gitpod-integration-tests/test", 100);
+        expect(result.length).to.be.eq(0);
     }
 }
 

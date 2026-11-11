@@ -5,17 +5,19 @@
  */
 
 import EventEmitter from "events";
-import React, { Suspense, useEffect, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
-    WorkspaceInstance,
     DisposableCollection,
     WorkspaceImageBuild,
     HEADLESS_LOG_STREAM_STATUS_CODE_REGEX,
     Disposable,
-    PrebuildWithStatus,
 } from "@gitpod/gitpod-protocol";
 import { getGitpodService } from "../service/service";
-import { PrebuildStatus } from "../projects/Prebuilds";
+import { PrebuildStatusOld } from "../projects/prebuild-utils";
+import { watchWorkspaceStatus } from "../data/workspaces/listen-to-workspace-ws-messages";
+import { prebuildClient, watchPrebuild, workspaceClient } from "../service/public-api";
+import { GetWorkspaceRequest, WorkspacePhase_Phase } from "@gitpod/public-api/lib/gitpod/v1/workspace_pb";
+import { Prebuild, PrebuildPhase_Phase } from "@gitpod/public-api/lib/gitpod/v1/prebuild_pb";
 
 const WorkspaceLogs = React.lazy(() => import("./WorkspaceLogs"));
 
@@ -27,23 +29,36 @@ export interface PrebuildLogsProps {
 }
 
 export default function PrebuildLogs(props: PrebuildLogsProps) {
-    const [workspaceInstance, setWorkspaceInstance] = useState<WorkspaceInstance | undefined>();
+    const [workspace, setWorkspace] = useState<
+        | {
+              phase?: WorkspacePhase_Phase;
+              instanceId?: string;
+          }
+        | undefined
+    >();
     const [error, setError] = useState<Error | undefined>();
-    const [logsEmitter] = useState(new EventEmitter());
-    const [prebuild, setPrebuild] = useState<PrebuildWithStatus | undefined>();
+    const logsEmitter = useMemo(() => new EventEmitter(), []);
+    const [prebuild, setPrebuild] = useState<Prebuild | undefined>();
 
-    function handlePrebuildUpdate(prebuild: PrebuildWithStatus) {
-        if (prebuild.info.buildWorkspaceId === props.workspaceId) {
-            setPrebuild(prebuild);
+    const handlePrebuildUpdate = useCallback(
+        (prebuild: Prebuild) => {
+            if (prebuild.workspaceId === props.workspaceId) {
+                setPrebuild(prebuild);
 
-            // In case the Prebuild got "aborted" or "time(d)out" we want to user to proceed anyway
-            if (props.onIgnorePrebuild && (prebuild.status === "aborted" || prebuild.status === "timeout")) {
-                props.onIgnorePrebuild();
+                // In case the Prebuild got "aborted" or "time(d)out" we want to user to proceed anyway
+                if (
+                    props.onIgnorePrebuild &&
+                    (prebuild.status?.phase?.name === PrebuildPhase_Phase.ABORTED ||
+                        prebuild.status?.phase?.name === PrebuildPhase_Phase.TIMEOUT)
+                ) {
+                    props.onIgnorePrebuild();
+                }
+                // TODO(gpl) We likely want to move the "happy path" logic (for status "available")
+                // here as well at some point. For that to work we need a "registerPrebuildUpdate(prebuildId)" API
             }
-            // TODO(gpl) We likely want to move the "happy path" logic (for status "available")
-            // here as well at some point. For that to work we need a "registerPrebuildUpdate(prebuildId)" API
-        }
-    }
+        },
+        [props],
+    );
 
     useEffect(() => {
         const disposables = new DisposableCollection();
@@ -51,27 +66,18 @@ export default function PrebuildLogs(props: PrebuildLogsProps) {
             if (!props.workspaceId) {
                 return;
             }
-            setWorkspaceInstance(undefined);
+            setWorkspace(undefined);
             setPrebuild(undefined);
 
             // Try get hold of a recent WorkspaceInfo
             try {
-                const info = await getGitpodService().server.getWorkspace(props.workspaceId);
-                setWorkspaceInstance(info?.latestInstance);
-            } catch (err) {
-                console.error(err);
-                setError(err);
-            }
-
-            // Try get hold of a recent Prebuild
-            try {
-                const pbws = await getGitpodService().server.findPrebuildByWorkspaceID(props.workspaceId);
-                if (pbws) {
-                    const foundPrebuild = await getGitpodService().server.getPrebuild(pbws.id);
-                    if (foundPrebuild) {
-                        handlePrebuildUpdate(foundPrebuild);
-                    }
-                }
+                const request = new GetWorkspaceRequest();
+                request.workspaceId = props.workspaceId;
+                const response = await workspaceClient.getWorkspace(request);
+                setWorkspace({
+                    instanceId: response.workspace?.status?.instanceId,
+                    phase: response.workspace?.status?.phase?.name,
+                });
             } catch (err) {
                 console.error(err);
                 setError(err);
@@ -79,54 +85,79 @@ export default function PrebuildLogs(props: PrebuildLogsProps) {
 
             // Register for future updates
             disposables.push(
+                watchWorkspaceStatus(props.workspaceId, (resp) => {
+                    if (resp.status?.instanceId && resp.status?.phase?.name) {
+                        setWorkspace({
+                            instanceId: resp.status.instanceId,
+                            phase: resp.status.phase.name,
+                        });
+                    }
+                }),
+            );
+            disposables.push(
                 getGitpodService().registerClient({
-                    onInstanceUpdate: (instance) => {
-                        if (props.workspaceId === instance.workspaceId) {
-                            setWorkspaceInstance(instance);
-                        }
-                    },
                     onWorkspaceImageBuildLogs: (
                         info: WorkspaceImageBuild.StateInfo,
                         content?: WorkspaceImageBuild.LogContent,
                     ) => {
-                        if (!content) {
+                        if (!content?.data) {
                             return;
                         }
-                        logsEmitter.emit("logs", content.text);
-                    },
-                    onPrebuildUpdate(update: PrebuildWithStatus) {
-                        if (update.info) {
-                            handlePrebuildUpdate(update);
-                        }
+                        const uintArray = new Uint8Array(content.data);
+                        logsEmitter.emit("logs", uintArray);
                     },
                 }),
             );
+
+            try {
+                const response = await prebuildClient.listPrebuilds({ workspaceId: props.workspaceId });
+                const prebuild = response.prebuilds[0];
+                if (prebuild) {
+                    handlePrebuildUpdate(prebuild);
+                    disposables.push(
+                        watchPrebuild(
+                            {
+                                scope: {
+                                    case: "prebuildId",
+                                    value: prebuild.id,
+                                },
+                            },
+                            handlePrebuildUpdate,
+                        ),
+                    );
+                } else {
+                    setError(new Error("Prebuild not found"));
+                }
+            } catch (err) {
+                console.error(err);
+                setError(err);
+            }
         })();
         return function cleanup() {
             disposables.dispose();
         };
-    }, [logsEmitter, props.workspaceId]);
+    }, [handlePrebuildUpdate, logsEmitter, props.workspaceId]);
 
     useEffect(() => {
         const workspaceId = props.workspaceId;
-        if (!workspaceId || !workspaceInstance?.status.phase) {
+        if (!workspaceId || !workspace?.phase) {
             return;
         }
 
         const disposables = new DisposableCollection();
-        switch (workspaceInstance.status.phase) {
+        switch (workspace.phase) {
             // "building" means we're building the Docker image for the prebuild's workspace so the workspace hasn't started yet.
-            case "building":
+            case WorkspacePhase_Phase.IMAGEBUILD:
                 // Try to grab image build logs
                 disposables.push(retryWatchWorkspaceImageBuildLogs(workspaceId));
                 break;
             // When we're "running" we want to switch to the logs from the actual prebuild workspace, instead
             // When the prebuild has "stopped", we still want to go for the logs
-            case "running":
-            case "stopped":
+            case WorkspacePhase_Phase.RUNNING:
+            case WorkspacePhase_Phase.STOPPED:
                 disposables.push(
                     watchHeadlessLogs(
-                        workspaceInstance.id,
+                        workspace.instanceId!,
                         (chunk) => {
                             logsEmitter.emit("logs", chunk);
                         },
@@ -137,17 +168,22 @@ export default function PrebuildLogs(props: PrebuildLogsProps) {
         return function cleanup() {
             disposables.dispose();
         };
-    }, [logsEmitter, props.workspaceId, workspaceInstance?.id, workspaceInstance?.status.phase]);
+    }, [logsEmitter, props.workspaceId, workspace?.instanceId, workspace?.phase]);
 
     return (
-        <div className="rounded-xl overflow-hidden bg-gray-100 dark:bg-gray-800 flex flex-col mb-8">
+        <div className="rounded-xl overflow-hidden bg-pk-surface-secondary flex flex-col mb-8">
             <div className="h-96 flex">
                 <Suspense fallback={<div />}>
-                    <WorkspaceLogs classes="h-full w-full" logsEmitter={logsEmitter} errorMessage={error?.message} />
+                    <WorkspaceLogs
+                        taskId="undefined"
+                        classes="h-full w-full"
+                        logsEmitter={logsEmitter}
+                        errorMessage={error?.message}
+                    />
                 </Suspense>
             </div>
-            <div className="w-full bottom-0 h-20 px-6 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-600 flex space-x-2">
-                {prebuild && <PrebuildStatus prebuild={prebuild} />}
+            <div className="w-full bottom-0 h-20 px-6 bg-pk-surface-secondary border-t border-gray-200 dark:border-gray-600 flex flex-row items-center space-x-2">
+                {prebuild && <PrebuildStatusOld prebuild={prebuild} />}
                 <div className="flex-grow" />
                 {props.children}
             </div>
@@ -233,7 +269,7 @@ function watchHeadlessLogs(
             }
 
             const streamUrl = logSources.streams[streamIds[0]];
-            console.log("fetching from streamUrl: " + streamUrl);
+            console.debug("fetching from streamUrl: " + streamUrl);
             response = await fetch(streamUrl, {
                 method: "GET",
                 cache: "no-cache",
